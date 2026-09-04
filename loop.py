@@ -17,6 +17,7 @@ This is the full implementation of:
 """
 
 from __future__ import annotations
+from typing import Optional
 import json
 import os
 import random
@@ -50,7 +51,7 @@ class GenerationLog:
 @dataclass
 class RunResult:
     config:       dict
-    generations:  list[GenerationLog]
+    generations:  List[GenerationLog]
     best_code:    str
     best_score:   float
     total_evaluations: int
@@ -61,7 +62,7 @@ class RunResult:
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def run(
-    scheduler: Scheduler | None = None,
+    scheduler: Optional[Scheduler] = None,
     seed: int = SEED,
     verbose: bool = True,
 ) -> RunResult:
@@ -85,7 +86,7 @@ def run(
         print(f"[Gen 0] Seed program score: {seed_eval.score:.1f}/100")
         print(f"        {seed_eval}")
 
-    logs: list[GenerationLog] = []
+    logs: List[GenerationLog] = []
     total_evals = 1
     run_start   = time.perf_counter()
 
@@ -101,7 +102,7 @@ def run(
         step_type   = "smart" if use_smart else "dumb"
 
         # ── 3. generate NUM_PROPOSERS candidates ──────────────────────────────
-        candidates: list[tuple[str, object]] = []   # (code, eval_result)
+        candidates: List[Tuple[str, object]] = []   # (code, eval_result)
 
         for _ in range(NUM_PROPOSERS):
             if use_smart:

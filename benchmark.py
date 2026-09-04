@@ -14,6 +14,7 @@ The evaluator returns a score 0–100:
   - Speed accounts for 30 points        (how fast relative to Python's built-in?)
 """
 
+from typing import Optional, List
 import random
 import time
 import traceback
@@ -22,7 +23,7 @@ from config import SEED, NUM_TEST_CASES
 
 # ── Generate fixed test cases once, seeded ────────────────────────────────────
 
-def _generate_test_cases(seed: int = SEED, n: int = NUM_TEST_CASES) -> list[list[int]]:
+def _generate_test_cases(seed: int = SEED, n: int = NUM_TEST_CASES) -> List[List[int]]:
     """Return a fixed list of input arrays. Same seed → same cases every run."""
     rng = random.Random(seed)
     cases = []
@@ -34,8 +35,8 @@ def _generate_test_cases(seed: int = SEED, n: int = NUM_TEST_CASES) -> list[list
 
 
 # Fixed at import time — never changes between runs
-TEST_CASES: list[list[int]] = _generate_test_cases()
-EXPECTED:   list[list[int]] = [sorted(tc) for tc in TEST_CASES]
+TEST_CASES: List[List[int]] = _generate_test_cases()
+EXPECTED:   List[List[int]] = [sorted(tc) for tc in TEST_CASES]
 
 # Baseline: measure Python's built-in sort speed once
 def _baseline_time() -> float:
@@ -52,7 +53,7 @@ BASELINE_TIME: float = _baseline_time()
 class EvaluationResult:
     """Holds the full result of evaluating one program."""
     def __init__(self, score: float, correct: int, total: int,
-                 speedup: float, error: str | None, trace: str | None):
+                 speedup: float, error: Optional[str], trace: Optional[str]):
         self.score   = score        # 0–100
         self.correct = correct      # number of test cases passed
         self.total   = total        # total test cases
@@ -113,8 +114,8 @@ def evaluate(code: str, timeout: float = 5.0) -> EvaluationResult:
 
     # ── 2. correctness + speed ─────────────────────────────────────────────────
     correct = 0
-    last_error: str | None = None
-    last_trace: str | None = None
+    last_error: Optional[str] = None
+    last_trace: Optional[str] = None
     start = time.perf_counter()
 
     for tc, expected in zip(TEST_CASES, EXPECTED):

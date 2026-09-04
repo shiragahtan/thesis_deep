@@ -18,6 +18,7 @@ The scheduler is a key research variable:
 """
 
 from __future__ import annotations
+from typing import Optional
 import random
 from config import SMART_STEP_RATIO
 
@@ -39,7 +40,7 @@ class Scheduler:
         strategy: str = "fixed_ratio",
         smart_ratio: float = SMART_STEP_RATIO,
         diversity_thresh: float = 5.0,
-        rng: random.Random | None = None,
+        rng: Optional[random.Random] = None,
     ):
         assert strategy in self.STRATEGIES, f"Unknown strategy: {strategy}"
         self.strategy         = strategy

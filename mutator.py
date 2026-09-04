@@ -14,6 +14,7 @@ Both functions return a new code string (or None if mutation fails).
 """
 
 from __future__ import annotations
+from typing import Optional, List, Dict, Tuple
 import random
 import re
 import anthropic
@@ -41,7 +42,7 @@ Rules:
 - Make a targeted change based on the failure evidence.
 """
 
-def smart_step(code: str, eval_result: EvaluationResult) -> str | None:
+def smart_step(code: str, eval_result: EvaluationResult) -> Optional[str]:
     """
     Call the LLM with the current code + failure evidence.
     Returns the improved code string, or None if the call fails.
@@ -90,7 +91,7 @@ def _extract_code(text: str) -> str:
 
 # ── Dumb Step (random mutation) ────────────────────────────────────────────────
 
-def dumb_step(code: str, rng: random.Random) -> str | None:
+def dumb_step(code: str, rng: random.Random) -> Optional[str]:
     """
     Apply a random syntactic mutation to the code.
     No knowledge of why the program failed.
@@ -119,7 +120,7 @@ def dumb_step(code: str, rng: random.Random) -> str | None:
         return None
 
 
-def _swap_lines(code: str, rng: random.Random) -> str | None:
+def _swap_lines(code: str, rng: random.Random) -> Optional[str]:
     lines = code.splitlines()
     if len(lines) < 3:
         return None
@@ -128,7 +129,7 @@ def _swap_lines(code: str, rng: random.Random) -> str | None:
     return "\n".join(lines)
 
 
-def _perturb_number(code: str, rng: random.Random) -> str | None:
+def _perturb_number(code: str, rng: random.Random) -> Optional[str]:
     numbers = [(m.start(), m.group()) for m in re.finditer(r'\b\d+\b', code)]
     if not numbers:
         return None
@@ -139,7 +140,7 @@ def _perturb_number(code: str, rng: random.Random) -> str | None:
     return code[:pos] + str(new_num) + code[pos + len(num_str):]
 
 
-def _swap_operator(code: str, rng: random.Random) -> str | None:
+def _swap_operator(code: str, rng: random.Random) -> Optional[str]:
     pairs = [('<', '>'), ('<=', '>='), ('+', '-'), ('*', '//')]
     candidates = [(a, b) for a, b in pairs if a in code]
     if not candidates:
@@ -152,7 +153,7 @@ def _swap_operator(code: str, rng: random.Random) -> str | None:
     return None
 
 
-def _duplicate_line(code: str, rng: random.Random) -> str | None:
+def _duplicate_line(code: str, rng: random.Random) -> Optional[str]:
     lines = code.splitlines()
     if len(lines) < 2:
         return None
@@ -161,7 +162,7 @@ def _duplicate_line(code: str, rng: random.Random) -> str | None:
     return "\n".join(lines)
 
 
-def _delete_line(code: str, rng: random.Random) -> str | None:
+def _delete_line(code: str, rng: random.Random) -> Optional[str]:
     lines = code.splitlines()
     # Only delete non-def, non-return, non-empty lines
     deletable = [i for i, l in enumerate(lines)

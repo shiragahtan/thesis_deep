@@ -1,0 +1,173 @@
+"""
+mutator.py
+----------
+Implements the two mutation strategies at the heart of the thesis:
+
+  DUMB STEP  →  xₜ₊₁ = Mutate_random(xₜ)
+                Random syntactic change. No knowledge of why the program failed.
+
+  SMART STEP →  xₜ₊₁ = LLM(xₜ, E(xₜ), score(xₜ))
+                The LLM reads the code AND the failure evidence before proposing
+                a fix. This is the thesis contribution.
+
+Both functions return a new code string (or None if mutation fails).
+"""
+
+from __future__ import annotations
+import random
+import re
+import anthropic
+from benchmark import EvaluationResult
+from config import LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE
+
+
+# ── Smart Step (LLM-guided) ────────────────────────────────────────────────────
+
+_CLIENT = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY from environment
+
+_SYSTEM_PROMPT = """\
+You are an expert Python programmer helping improve a sorting algorithm.
+You will be shown:
+  1. The current code
+  2. How it performed (score, correctness, speed)
+  3. Any error or failure evidence
+
+Your task: propose ONE improved version of the function `sort_array(arr: list) -> list`.
+
+Rules:
+- Return ONLY the Python code block, no explanation.
+- The function must be named exactly `sort_array`.
+- Do not use Python's built-in `sorted()` or `list.sort()`.
+- Make a targeted change based on the failure evidence.
+"""
+
+def smart_step(code: str, eval_result: EvaluationResult) -> str | None:
+    """
+    Call the LLM with the current code + failure evidence.
+    Returns the improved code string, or None if the call fails.
+
+    This implements:  xₜ₊₁ = LLM(xₜ, E(xₜ), score(xₜ))
+    """
+    user_message = f"""\
+## Current code
+```python
+{code}
+```
+
+## Failure evidence
+{eval_result.failure_evidence()}
+
+Please propose an improved version of `sort_array`.
+"""
+    try:
+        response = _CLIENT.messages.create(
+            model=LLM_MODEL,
+            max_tokens=LLM_MAX_TOKENS,
+            temperature=LLM_TEMPERATURE,
+            system=_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+        )
+        raw = response.content[0].text
+        return _extract_code(raw)
+    except Exception as exc:
+        print(f"  [smart_step] LLM call failed: {exc}")
+        return None
+
+
+def _extract_code(text: str) -> str:
+    """Extract the first Python code block from the LLM response."""
+    # Try ```python ... ``` block first
+    match = re.search(r"```python\s*(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # Fall back to ``` ... ```
+    match = re.search(r"```\s*(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    # Return raw text if no code block found
+    return text.strip()
+
+
+# ── Dumb Step (random mutation) ────────────────────────────────────────────────
+
+def dumb_step(code: str, rng: random.Random) -> str | None:
+    """
+    Apply a random syntactic mutation to the code.
+    No knowledge of why the program failed.
+
+    This implements:  xₜ₊₁ = Mutate_random(xₜ)
+
+    Mutations (chosen randomly):
+      1. Swap two adjacent lines
+      2. Replace a numeric literal with a nearby value
+      3. Swap a comparison operator
+      4. Duplicate a line
+      5. Delete a non-essential line
+    """
+    mutations = [
+        _swap_lines,
+        _perturb_number,
+        _swap_operator,
+        _duplicate_line,
+        _delete_line,
+    ]
+    chosen = rng.choice(mutations)
+    try:
+        result = chosen(code, rng)
+        return result if result and result.strip() else None
+    except Exception:
+        return None
+
+
+def _swap_lines(code: str, rng: random.Random) -> str | None:
+    lines = code.splitlines()
+    if len(lines) < 3:
+        return None
+    i = rng.randint(1, len(lines) - 2)
+    lines[i], lines[i + 1] = lines[i + 1], lines[i]
+    return "\n".join(lines)
+
+
+def _perturb_number(code: str, rng: random.Random) -> str | None:
+    numbers = [(m.start(), m.group()) for m in re.finditer(r'\b\d+\b', code)]
+    if not numbers:
+        return None
+    pos, num_str = rng.choice(numbers)
+    num = int(num_str)
+    delta = rng.choice([-1, 1, -2, 2])
+    new_num = max(0, num + delta)
+    return code[:pos] + str(new_num) + code[pos + len(num_str):]
+
+
+def _swap_operator(code: str, rng: random.Random) -> str | None:
+    pairs = [('<', '>'), ('<=', '>='), ('+', '-'), ('*', '//')]
+    candidates = [(a, b) for a, b in pairs if a in code]
+    if not candidates:
+        return None
+    a, b = rng.choice(candidates)
+    if rng.random() < 0.5:
+        return code.replace(a, b, 1)
+    elif b in code:
+        return code.replace(b, a, 1)
+    return None
+
+
+def _duplicate_line(code: str, rng: random.Random) -> str | None:
+    lines = code.splitlines()
+    if len(lines) < 2:
+        return None
+    i = rng.randint(0, len(lines) - 1)
+    lines.insert(i + 1, lines[i])
+    return "\n".join(lines)
+
+
+def _delete_line(code: str, rng: random.Random) -> str | None:
+    lines = code.splitlines()
+    # Only delete non-def, non-return, non-empty lines
+    deletable = [i for i, l in enumerate(lines)
+                 if l.strip() and not l.strip().startswith(('def ', 'return', '"""', "'''"))]
+    if not deletable:
+        return None
+    i = rng.choice(deletable)
+    del lines[i]
+    return "\n".join(lines)

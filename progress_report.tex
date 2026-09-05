@@ -267,6 +267,45 @@ The LLM, given the failure evidence (``speed: 0.02$\times$ baseline, correct
 but $O(n^2)$''), should be able to propose a fundamentally different algorithm
 --- something a random line swap cannot do.
 
+\subsection{Hyperparameter Sweep (Dumb-Only, 36 Configs)}
+
+We ran a grid search over population size, number of proposers, and top-$K$
+parents — all in dumb-only mode (no LLM). This gives us the best configuration
+to use as a baseline before introducing the smart step.
+
+\textbf{Parameter grid:}
+\begin{itemize}
+  \item \texttt{POPULATION\_SIZE} $\in \{5, 10, 20\}$
+  \item \texttt{NUM\_PROPOSERS} $\in \{1, 3, 5, 10\}$
+  \item \texttt{TOP\_K\_PARENTS} $\in \{1, 3, 5\}$
+\end{itemize}
+
+\textbf{Key finding}: The number of proposers matters most. With 1 proposer
+per generation, all configs plateau at 70.5 regardless of population size or
+top-$K$. With $\geq 3$ proposers, scores reach 71.7--71.9. The best
+configuration found:
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Config} & \textbf{Score} & \textbf{Evaluations} \\
+\midrule
+pop=10, proposers=10, top-k=1 & 71.91 & 94 \\
+pop=20, proposers=10, top-k=3 & 71.90 & 99 \\
+pop=10, proposers=5,  top-k=1 & 71.90 & 51 \\
+\midrule
+\textit{1 proposer (all configs)} & $\approx$70.5 & 11 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Interpretation}: More proposers = better coverage of the mutation space
+per generation. But even the best dumb-only config is stuck at 71.9 — confirming
+the baseline cannot escape the $O(n^2)$ basin without semantic guidance.
+
+For the smart-step comparison, we will use the balanced default:
+\texttt{pop=10, proposers=5, top-k=3}.
+
 \subsection{Evaluator Sanity Check}
 
 Running all four evaluator variants on the selection sort seed program:
@@ -304,6 +343,24 @@ The interesting question is whether the search can discover Strassen-like
 divide-and-conquer approaches that go \emph{faster} than naive.
 
 % ─────────────────────────────────────────────────────────────────────────────
+\subsection{Engineering Robustness}
+
+During the sweep, we discovered and fixed a critical bug: the \texttt{evaluate()}
+function accepted a \texttt{timeout} parameter but did not enforce it. Mutations
+that introduced infinite loops (e.g.\ \texttt{\_swap\_operator} replacing
+\texttt{<} with \texttt{>} in a while-loop condition) would hang the process
+indefinitely.
+
+\textbf{Fix}: Added \texttt{signal.SIGALRM} enforcement — any evaluation that
+exceeds 5 seconds is killed and scored 0. This is now verified:
+
+\begin{lstlisting}
+# Infinite-loop program
+bad = "def sort_array(arr):\n    while True: pass"
+r = evaluate(bad, timeout=2)
+# -> score=0.0, error="Timeout after 2.0s (infinite loop?)"
+\end{lstlisting}
+
 \section{Next Steps}
 
 \subsection{Immediate (requires API key)}

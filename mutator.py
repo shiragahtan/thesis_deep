@@ -104,6 +104,9 @@ def dumb_step(code: str, rng: random.Random) -> Optional[str]:
       3. Swap a comparison operator
       4. Duplicate a line
       5. Delete a non-essential line
+      6. Insert a sorting primitive (NEW — structural mutation)
+      7. Wrap inner loop with early-exit guard (NEW — structural mutation)
+      8. Rename a loop variable (NEW — cosmetic, tests population diversity)
     """
     mutations = [
         _swap_lines,
@@ -111,6 +114,9 @@ def dumb_step(code: str, rng: random.Random) -> Optional[str]:
         _swap_operator,
         _duplicate_line,
         _delete_line,
+        _insert_primitive,
+        _add_early_exit,
+        _rename_variable,
     ]
     chosen = rng.choice(mutations)
     try:
@@ -172,3 +178,131 @@ def _delete_line(code: str, rng: random.Random) -> Optional[str]:
     i = rng.choice(deletable)
     del lines[i]
     return "\n".join(lines)
+
+
+# ── Structural mutations (stronger, but still blind) ──────────────────────────
+
+_PRIMITIVES = [
+    # Insertion sort kernel
+    ("insertion_sort", """\
+def _insertion_sort(arr):
+    for i in range(1, len(arr)):
+        key = arr[i]
+        j = i - 1
+        while j >= 0 and arr[j] > key:
+            arr[j + 1] = arr[j]
+            j -= 1
+        arr[j + 1] = key
+    return arr
+"""),
+    # Merge helper
+    ("merge_sort", """\
+def _merge(left, right):
+    result = []
+    i = j = 0
+    while i < len(left) and j < len(right):
+        if left[i] <= right[j]:
+            result.append(left[i]); i += 1
+        else:
+            result.append(right[j]); j += 1
+    result.extend(left[i:])
+    result.extend(right[j:])
+    return result
+
+def _merge_sort(arr):
+    if len(arr) <= 1:
+        return arr
+    mid = len(arr) // 2
+    return _merge(_merge_sort(arr[:mid]), _merge_sort(arr[mid:]))
+"""),
+    # Quicksort partition
+    ("quick_sort", """\
+def _partition(arr, lo, hi):
+    pivot = arr[hi]
+    i = lo - 1
+    for j in range(lo, hi):
+        if arr[j] <= pivot:
+            i += 1
+            arr[i], arr[j] = arr[j], arr[i]
+    arr[i + 1], arr[hi] = arr[hi], arr[i + 1]
+    return i + 1
+
+def _quick_sort(arr, lo, hi):
+    if lo < hi:
+        p = _partition(arr, lo, hi)
+        _quick_sort(arr, lo, p - 1)
+        _quick_sort(arr, p + 1, hi)
+"""),
+    # Heap sort helper
+    ("heap_sort", """\
+def _heapify(arr, n, i):
+    largest = i
+    l, r = 2 * i + 1, 2 * i + 2
+    if l < n and arr[l] > arr[largest]:
+        largest = l
+    if r < n and arr[r] > arr[largest]:
+        largest = r
+    if largest != i:
+        arr[i], arr[largest] = arr[largest], arr[i]
+        _heapify(arr, n, largest)
+"""),
+]
+
+_PRIMITIVE_WRAPPERS = {
+    "insertion_sort": "    arr = list(arr)\n    return _insertion_sort(arr)\n",
+    "merge_sort":     "    return _merge_sort(list(arr))\n",
+    "quick_sort":     "    arr = list(arr)\n    _quick_sort(arr, 0, len(arr) - 1)\n    return arr\n",
+    "heap_sort": (
+        "    arr = list(arr)\n"
+        "    n = len(arr)\n"
+        "    for i in range(n // 2 - 1, -1, -1):\n"
+        "        _heapify(arr, n, i)\n"
+        "    for i in range(n - 1, 0, -1):\n"
+        "        arr[0], arr[i] = arr[i], arr[0]\n"
+        "        _heapify(arr, i, 0)\n"
+        "    return arr\n"
+    ),
+}
+
+
+def _insert_primitive(code: str, rng: random.Random) -> Optional[str]:
+    """
+    Replace the body of sort_array with a call to a known-good sorting primitive.
+    This is a 'strong dumb step' — structurally meaningful but still random (no LLM).
+    """
+    name, helper = rng.choice(_PRIMITIVES)
+    wrapper = _PRIMITIVE_WRAPPERS[name]
+    new_code = helper + "\ndef sort_array(arr: list) -> list:\n" + wrapper
+    return new_code
+
+
+def _add_early_exit(code: str, rng: random.Random) -> Optional[str]:
+    """
+    Add an early-exit check at the top of sort_array: if len <= 1, return immediately.
+    Harmless optimization that often helps speed on already-short arrays.
+    """
+    if "if len(arr) <= 1" in code:
+        return None  # already there
+    lines = code.splitlines()
+    # Find the line after 'def sort_array'
+    for i, line in enumerate(lines):
+        if line.strip().startswith("def sort_array"):
+            indent = "    "
+            lines.insert(i + 1, f"{indent}if len(arr) <= 1:\n{indent}    return list(arr)")
+            return "\n".join(lines)
+    return None
+
+
+def _rename_variable(code: str, rng: random.Random) -> Optional[str]:
+    """
+    Rename a loop variable (i→ii, j→jj, etc.) — tests that population
+    can still accept semantically equivalent programs.
+    """
+    pairs = [('\\bi\\b', 'ii'), ('\\bj\\b', 'jj'), ('\\bk\\b', 'kk'),
+             ('\\bmin_idx\\b', 'min_i'), ('\\bpivot\\b', 'piv')]
+    rng.shuffle(pairs)
+    for pattern, replacement in pairs:
+        new_code = re.sub(pattern, replacement, code)
+        if new_code != code:
+            return new_code
+    return None

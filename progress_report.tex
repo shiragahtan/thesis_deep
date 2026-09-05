@@ -1,0 +1,361 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{parskip}
+
+% Colors
+\definecolor{darkgreen}{HTML}{1A3A2A}
+\definecolor{gold}{HTML}{D4A843}
+\definecolor{codeblue}{HTML}{2E4A7A}
+\definecolor{codegray}{HTML}{555555}
+
+% Code listing style
+\lstset{
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codeblue}\bfseries,
+  commentstyle=\color{codegray}\itshape,
+  breaklines=true,
+  frame=single,
+  backgroundcolor=\color{gray!8},
+  numbers=left,
+  numberstyle=\tiny\color{codegray},
+  language=Python,
+}
+
+\hypersetup{colorlinks=true, linkcolor=codeblue, urlcolor=codeblue}
+
+% ─────────────────────────────────────────────────────────────────────────────
+
+\title{
+  \textbf{LLM-Guided Evolutionary Search} \\[0.4em]
+  \large MSc Thesis Progress Report \\[0.2em]
+  \normalsize Technion --- Israel Institute of Technology
+}
+\author{Shira Ahtan \\ \texttt{sgahtan@nvidia.com}}
+\date{September 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Motivation and Thesis Statement}
+
+\subsection{Background: AlphaEvolve}
+
+AlphaEvolve~\cite{alphaevolve2025} (Google DeepMind, 2025) is an evolutionary
+program-search framework that uses large language models (LLMs) as mutation
+operators. Starting from a seed program, AlphaEvolve iteratively proposes
+improved variants using Gemini, evaluated on a fixed benchmark. Its most
+notable result was discovering a matrix multiplication algorithm that beat
+Strassen's 56-year-old record: reducing complexity from $O(n^{2.807})$ to
+$O(n^{2.778})$.
+
+AlphaEvolve's mutation step can be written as:
+\[
+  x_{t+1} = \mathrm{LLM}(x_t)
+\]
+
+The LLM sees only the current code $x_t$. It is \textbf{blind to why the
+program failed}: it does not receive the score, the error trace, or any
+signal about what went wrong.
+
+\subsection{The Thesis Contribution}
+
+This thesis proposes one targeted upgrade: provide the LLM with \emph{failure
+evidence} $E(x_t)$ before each mutation:
+
+\[
+  \boxed{x_{t+1} = \mathrm{LLM}\!\left(x_t,\; E(x_t),\; \mathrm{score}(x_t)\right)}
+\]
+
+where $E(x_t)$ is a structured failure report containing:
+\begin{itemize}
+  \item The current score (0--100)
+  \item Correctness: how many test cases passed
+  \item Speed: measured speedup vs baseline
+  \item The last exception message (if any)
+  \item A truncated stack trace (if any)
+\end{itemize}
+
+The hypothesis is that this \textbf{diagnosis-driven mutation} --- which we
+call the \emph{smart step} --- should reach a target fitness with fewer
+evaluator calls than the blind mutation (\emph{dumb step}), improving
+\emph{sample efficiency}.
+
+We call the blind baseline the \textit{dumb step}:
+\[
+  x_{t+1} = \mathrm{Mutate\_random}(x_t)
+\]
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Research Questions}
+
+\begin{enumerate}
+  \item[\textbf{Q1}] \textbf{Sample efficiency}: Does failure-informed mutation
+    reach target fitness with fewer evaluator calls?
+  \item[\textbf{Q2}] \textbf{Explore vs exploit}: When in the search trajectory
+    does the smart step help most --- early exploration or late refinement?
+  \item[\textbf{Q3}] \textbf{Smart/dumb balance}: What is the optimal ratio of
+    smart to dumb steps, especially when diversity collapses?
+  \item[\textbf{Q4}] \textbf{LLM convergence}: Does using the same LLM for all
+    mutations cause the population to converge to homogeneous code patterns?
+  \item[\textbf{Q5}] \textbf{Failure signal}: Which component of $E(x_t)$ is
+    most informative --- error type, score delta, or stack trace?
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{System Architecture}
+
+The implementation is modular, with each concern in its own file:
+
+\begin{center}
+\begin{tabular}{lp{9cm}}
+\toprule
+\textbf{File} & \textbf{Responsibility} \\
+\midrule
+\texttt{config.py}          & All hyperparameters in one place \\
+\texttt{benchmark.py}       & Fixed sorting task; evaluator returning score 0--100 \\
+\texttt{benchmark\_matrix.py} & Second task: matrix multiplication \\
+\texttt{population.py}      & Population of programs; weighted parent selection \\
+\texttt{mutator.py}         & Smart step (LLM) and dumb step (random + structural) \\
+\texttt{evaluators.py}      & Multiple scoring variants (combined, correctness, speed) \\
+\texttt{scheduler.py}       & Decides smart vs dumb per generation \\
+\texttt{loop.py}            & Main evolutionary loop; saves JSON logs \\
+\texttt{main.py}            & CLI entry point \\
+\texttt{compare.py}         & Ablation runner: smart vs dumb vs mixed \\
+\texttt{param\_sweep.py}    & Hyperparameter grid search (no LLM required) \\
+\texttt{plot.py}            & Three-panel results visualization \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{The Evolutionary Loop}
+
+Each generation:
+\begin{enumerate}
+  \item Select a parent from the top-$K$ programs (weighted by score)
+  \item Decide: smart step or dumb step (via Scheduler)
+  \item Generate $k$ candidate mutations in parallel (multiple proposers)
+  \item Evaluate all candidates on the fixed benchmark
+  \item Accept the best candidate if it beats the worst in the population
+  \item Log and optionally early-stop if target score is reached
+\end{enumerate}
+
+\subsection{Dumb Step Mutations}
+
+The dumb step applies one of eight random mutations without any knowledge of
+why the program failed:
+
+\begin{enumerate}
+  \item Swap two adjacent lines
+  \item Replace a numeric literal with a nearby value ($\pm 1, \pm 2$)
+  \item Swap a comparison or arithmetic operator
+  \item Duplicate a line
+  \item Delete a non-essential line
+  \item \textbf{Insert a sorting primitive} (insertion sort, merge sort, quicksort, heapsort)
+  \item \textbf{Add an early-exit guard} (\texttt{if len(arr) <= 1: return})
+  \item \textbf{Rename a loop variable} (tests population diversity)
+\end{enumerate}
+
+Items 6--8 are \emph{structural mutations} added to make the dumb-step
+baseline stronger --- a better baseline makes the comparison with the smart
+step more meaningful.
+
+\subsection{Evaluator Variants}
+
+Four scoring functions are implemented in \texttt{evaluators.py}:
+
+\begin{center}
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{Variant} & \textbf{Formula} \\
+\midrule
+\texttt{combined}      & $70\% \times \text{correctness} + 30\% \times \text{speed}$ (default) \\
+\texttt{correctness}   & $100\% \times \text{correctness}$, speed ignored \\
+\texttt{speed}         & $100\% \times \text{speed}$, hard gate on correctness \\
+\texttt{strict\_speed} & $\min(100,\; 20 \times \text{speedup})$, finer resolution \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Benchmark Tasks}
+
+\subsection{Sorting (Primary)}
+
+\textbf{Task}: Optimize a \texttt{sort\_array(arr: list) -> list} function.
+
+\textbf{Seed program}: Selection sort ($O(n^2)$).
+
+\textbf{Scoring}:
+\[
+  \text{score} = 70 \cdot \frac{\text{correct}}{\text{total}} + \min\!\left(30,\; 30 \cdot \frac{t_{\text{baseline}}}{t_{\text{candidate}}}\right)
+\]
+
+\textbf{Test cases}: 20 fixed arrays (seed 42), sizes 10--200, values
+$[-1000, 1000]$.
+
+\textbf{Why sorting?} It is deterministic, fully reproducible, gradable on
+two axes (correctness + speed), and directly analogous to AlphaEvolve's
+matrix multiplication task.
+
+\subsection{Matrix Multiplication (Second Benchmark)}
+
+\textbf{Task}: Optimize a \texttt{matmul(A, B) -> list} function.
+
+\textbf{Seed program}: Naive $O(n^3)$ triple-loop multiplication.
+
+\textbf{Scoring}: $60\%$ correctness $+$ $40\%$ speed.
+
+\textbf{Test cases}: 15 cases ($5 \times$ each of $2\times2$, $4\times4$, $8\times8$
+matrices).
+
+\textbf{Why matrix multiplication?} This is exactly the task where AlphaEvolve
+made its headline result. Running our framework on this task directly compares
+to the AlphaEvolve baseline.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Preliminary Results}
+
+\subsection{Dumb-Only Baseline (6 Seeds)}
+
+We ran the dumb-only configuration (equivalent to AlphaEvolve's blind mutation)
+across 6 random seeds to establish a robust baseline.
+
+\begin{center}
+\begin{tabular}{cccc}
+\toprule
+\textbf{Seed} & \textbf{Start Score} & \textbf{Final Score} & \textbf{Target (95) Reached?} \\
+\midrule
+42  & 70.4 & 71.6 & \texttimes \\
+1   & 70.4 & 72.2 & \texttimes \\
+7   & 70.4 & 70.5 & \texttimes \\
+13  & 70.4 & 70.5 & \texttimes \\
+21  & 70.4 & 70.5 & \texttimes \\
+99  & 70.4 & 70.5 & \texttimes \\
+\midrule
+\textbf{Mean} & \textbf{70.4} & \textbf{71.1} & \textbf{0/6} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Key observations}:
+\begin{itemize}
+  \item Blind random mutation is unable to escape the selection sort basin.
+    All 6 runs plateau at 70--73 within 15 generations.
+  \item Population diversity collapses to 0.0 by generation $\approx$15 in
+    every run. Once everyone in the population is the same program, dumb steps
+    produce only broken variants that fail to score higher.
+  \item The ``best'' program found by dumb-only is selection sort with minor
+    cosmetic edits (e.g.\ a duplicated \texttt{return} line).
+  \item All 251 evaluations are consumed (50 generations $\times$ 5 proposers
+    $+$ 1 seed), yet the target score of 95 is never reached.
+\end{itemize}
+
+\textbf{Interpretation}: This is exactly the motivation for the smart step.
+The LLM, given the failure evidence (``speed: 0.02$\times$ baseline, correct
+but $O(n^2)$''), should be able to propose a fundamentally different algorithm
+--- something a random line swap cannot do.
+
+\subsection{Evaluator Sanity Check}
+
+Running all four evaluator variants on the selection sort seed program:
+
+\begin{center}
+\begin{tabular}{lccr}
+\toprule
+\textbf{Evaluator} & \textbf{Score} & \textbf{Correct} & \textbf{Speedup} \\
+\midrule
+\texttt{combined}     & 70.6 & 20/20 & 0.02$\times$ \\
+\texttt{correctness}  & 100.0 & 20/20 & --- \\
+\texttt{speed}        & 2.4  & 20/20 & 0.02$\times$ \\
+\texttt{strict\_speed} & 0.5  & 20/20 & 0.02$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The \texttt{correctness} evaluator gives 100/100 immediately (selection sort
+is correct), making this a trivial task. The \texttt{speed} and
+\texttt{strict\_speed} evaluators give nearly 0 (selection sort is 50$\times$
+slower than Python's built-in Timsort), making the search objective pure
+speed optimization. This validates all four variants behave as intended.
+
+\subsection{Matrix Benchmark Sanity Check}
+
+The naive $O(n^3)$ seed program on the matrix task:
+\begin{itemize}
+  \item Score: 97.8/100
+  \item Correct: 15/15 test cases
+  \item Speedup: 0.95$\times$ vs baseline (essentially identical --- baseline \emph{is} naive)
+\end{itemize}
+
+The high score means the matrix task is less challenging at the baseline level.
+The interesting question is whether the search can discover Strassen-like
+divide-and-conquer approaches that go \emph{faster} than naive.
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Next Steps}
+
+\subsection{Immediate (requires API key)}
+\begin{enumerate}
+  \item Set \texttt{ANTHROPIC\_API\_KEY} and run \texttt{python compare.py}:
+    compare smart-only vs dumb-only vs mixed across 3+ seeds.
+  \item Analyse the smart step trajectories: does the LLM propose merge sort /
+    quicksort on the first few calls?
+  \item Run the evaluator ablation: does \texttt{correctness} or \texttt{speed}
+    as the sole signal change what the LLM proposes?
+\end{enumerate}
+
+\subsection{Short Term}
+\begin{enumerate}
+  \item Complete the hyperparameter sweep (\texttt{param\_sweep.py}) and
+    identify the best population/proposer configuration.
+  \item Port the framework to the matrix multiplication benchmark and run
+    the same smart vs dumb comparison.
+  \item Add AutoResearch~\cite{autoresearch} as a third comparison baseline.
+\end{enumerate}
+
+\subsection{Long Term}
+\begin{enumerate}
+  \item Scale to 3+ seeds per configuration and report mean $\pm$ std.
+  \item Study diversity collapse: measure code-level similarity (token overlap,
+    AST edit distance) not just score std-dev.
+  \item Investigate island model: run $k$ independent populations and
+    periodically migrate the best programs between them.
+  \item Ablate $E(x_t)$ components (Q5): does removing the stack trace or
+    the score from the context change the LLM's proposals?
+\end{enumerate}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Repository}
+
+Code is available at:
+\url{https://github.com/shiragahtan/thesis_deep}
+
+\begin{thebibliography}{9}
+\bibitem{alphaevolve2025}
+  Google DeepMind,
+  \textit{AlphaEvolve: A Gemini-Powered Coding Agent for Designing Advanced Algorithms},
+  2025.
+
+\bibitem{funsearch2023}
+  Romera-Paredes et al.,
+  \textit{Mathematical Discoveries from Program Search with Large Language Models (FunSearch)},
+  Nature, 2023.
+
+\bibitem{autoresearch}
+  AutoResearch: Automated Scientific Research using LLM-Guided Search,
+  2024.
+\end{thebibliography}
+
+\end{document}

@@ -17,18 +17,15 @@ This is the full implementation of:
 """
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, List, Tuple
 import json
 import os
 import random
 import time
 from dataclasses import dataclass, asdict
 
+import config as _cfg
 from benchmark import evaluate, SEED_PROGRAM
-from config import (
-    SEED, POPULATION_SIZE, TOP_K_PARENTS, NUM_PROPOSERS,
-    MAX_GENERATIONS, TARGET_SCORE, RESULTS_DIR, LOG_EVERY,
-)
 from mutator import smart_step, dumb_step
 from population import Population, Program
 from scheduler import Scheduler
@@ -63,20 +60,35 @@ class RunResult:
 
 def run(
     scheduler: Optional[Scheduler] = None,
-    seed: int = SEED,
+    seed: int = None,
     verbose: bool = True,
+    max_generations: Optional[int] = None,
+    num_proposers: Optional[int] = None,
+    population_size: Optional[int] = None,
+    top_k: Optional[int] = None,
 ) -> RunResult:
     """
     Run the full evolutionary search and return a RunResult.
 
     Args:
-        scheduler:  Scheduler instance (default: fixed_ratio)
-        seed:       random seed for reproducibility
-        verbose:    print progress logs
+        scheduler:        Scheduler instance (default: fixed_ratio)
+        seed:             random seed for reproducibility
+        verbose:          print progress logs
+        max_generations:  override config.MAX_GENERATIONS
+        num_proposers:    override config.NUM_PROPOSERS
+        population_size:  override config.POPULATION_SIZE
+        top_k:            override config.TOP_K_PARENTS
     """
-    rng       = random.Random(seed)
+    # Read from live config (allows runtime overrides) then apply call-site overrides
+    _seed        = seed if seed is not None else _cfg.SEED
+    _max_gen     = max_generations  if max_generations  is not None else _cfg.MAX_GENERATIONS
+    _proposers   = num_proposers    if num_proposers    is not None else _cfg.NUM_PROPOSERS
+    _pop_size    = population_size  if population_size  is not None else _cfg.POPULATION_SIZE
+    _top_k       = top_k            if top_k            is not None else _cfg.TOP_K_PARENTS
+
+    rng       = random.Random(_seed)
     scheduler = scheduler or Scheduler(rng=rng)
-    pop       = Population(max_size=POPULATION_SIZE, top_k=TOP_K_PARENTS)
+    pop       = Population(max_size=_pop_size, top_k=min(_top_k, _pop_size))
 
     # ── seed the population with the baseline program ─────────────────────────
     seed_eval = evaluate(SEED_PROGRAM)
@@ -90,7 +102,7 @@ def run(
     total_evals = 1
     run_start   = time.perf_counter()
 
-    for gen in range(1, MAX_GENERATIONS + 1):
+    for gen in range(1, _max_gen + 1):
         gen_start = time.perf_counter()
 
         # ── 1. select parent ─────────────────────────────────────────────────
@@ -101,10 +113,10 @@ def run(
         use_smart   = scheduler.use_smart_step(diversity=diversity)
         step_type   = "smart" if use_smart else "dumb"
 
-        # ── 3. generate NUM_PROPOSERS candidates ──────────────────────────────
+        # ── 3. generate _proposers candidates ────────────────────────────────
         candidates: List[Tuple[str, object]] = []   # (code, eval_result)
 
-        for _ in range(NUM_PROPOSERS):
+        for _ in range(_proposers):
             if use_smart:
                 new_code = smart_step(parent.code, parent.eval_result)
             else:
@@ -146,16 +158,16 @@ def run(
         )
         logs.append(log)
 
-        if verbose and (gen % LOG_EVERY == 0 or gen == 1):
+        if verbose and (gen % _cfg.LOG_EVERY == 0 or gen == 1):
             print(f"[Gen {gen:3d}] best={pop.best().score:.1f}  "
                   f"mean={mean_score:.1f}  div={diversity:.1f}  "
                   f"step={step_type}  accepted={accepted}  "
                   f"evals={total_evals}")
 
         # ── 6. early stop ─────────────────────────────────────────────────────
-        if pop.best().score >= TARGET_SCORE:
+        if pop.best().score >= _cfg.TARGET_SCORE:
             if verbose:
-                print(f"\n✓ Target score {TARGET_SCORE} reached at generation {gen}!")
+                print(f"\n✓ Target score {_cfg.TARGET_SCORE} reached at generation {gen}!")
             break
 
     total_elapsed = time.perf_counter() - run_start
@@ -167,7 +179,7 @@ def run(
         best_code=best.code,
         best_score=best.score,
         total_evaluations=total_evals,
-        reached_target=best.score >= TARGET_SCORE,
+        reached_target=best.score >= _cfg.TARGET_SCORE,
         elapsed_sec=round(total_elapsed, 2),
     )
 
@@ -193,9 +205,9 @@ def _current_config() -> dict:
 
 
 def _save_result(result: RunResult):
-    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(_cfg.RESULTS_DIR, exist_ok=True)
     timestamp = int(time.time())
-    path = os.path.join(RESULTS_DIR, f"run_{timestamp}.json")
+    path = os.path.join(_cfg.RESULTS_DIR, f"run_{timestamp}.json")
 
     # Convert to JSON-serializable dict
     data = {

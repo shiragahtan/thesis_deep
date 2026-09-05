@@ -215,43 +215,46 @@ def _merge_sort(arr):
     mid = len(arr) // 2
     return _merge(_merge_sort(arr[:mid]), _merge_sort(arr[mid:]))
 """),
-    # Quicksort partition
+    # Quicksort — iterative to avoid recursion limit on arrays up to 200
     ("quick_sort", """\
-def _partition(arr, lo, hi):
-    pivot = arr[hi]
-    i = lo - 1
-    for j in range(lo, hi):
-        if arr[j] <= pivot:
-            i += 1
-            arr[i], arr[j] = arr[j], arr[i]
-    arr[i + 1], arr[hi] = arr[hi], arr[i + 1]
-    return i + 1
-
-def _quick_sort(arr, lo, hi):
-    if lo < hi:
-        p = _partition(arr, lo, hi)
-        _quick_sort(arr, lo, p - 1)
-        _quick_sort(arr, p + 1, hi)
+def _quick_sort(arr):
+    stack = [(0, len(arr) - 1)]
+    while stack:
+        lo, hi = stack.pop()
+        if lo >= hi:
+            continue
+        pivot = arr[hi]
+        i = lo - 1
+        for j in range(lo, hi):
+            if arr[j] <= pivot:
+                i += 1
+                arr[i], arr[j] = arr[j], arr[i]
+        arr[i + 1], arr[hi] = arr[hi], arr[i + 1]
+        p = i + 1
+        stack.append((lo, p - 1))
+        stack.append((p + 1, hi))
 """),
-    # Heap sort helper
+    # Heap sort — iterative heapify, no recursion
     ("heap_sort", """\
 def _heapify(arr, n, i):
-    largest = i
-    l, r = 2 * i + 1, 2 * i + 2
-    if l < n and arr[l] > arr[largest]:
-        largest = l
-    if r < n and arr[r] > arr[largest]:
-        largest = r
-    if largest != i:
+    while True:
+        largest = i
+        l, r = 2 * i + 1, 2 * i + 2
+        if l < n and arr[l] > arr[largest]:
+            largest = l
+        if r < n and arr[r] > arr[largest]:
+            largest = r
+        if largest == i:
+            break
         arr[i], arr[largest] = arr[largest], arr[i]
-        _heapify(arr, n, largest)
+        i = largest
 """),
 ]
 
 _PRIMITIVE_WRAPPERS = {
     "insertion_sort": "    arr = list(arr)\n    return _insertion_sort(arr)\n",
     "merge_sort":     "    return _merge_sort(list(arr))\n",
-    "quick_sort":     "    arr = list(arr)\n    _quick_sort(arr, 0, len(arr) - 1)\n    return arr\n",
+    "quick_sort":     "    arr = list(arr)\n    _quick_sort(arr)\n    return arr\n",
     "heap_sort": (
         "    arr = list(arr)\n"
         "    n = len(arr)\n"

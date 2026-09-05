@@ -47,24 +47,28 @@ SEEDS = [42, 1, 7]   # 3 seeds per config for statistical robustness
 
 def run_config(pop_size, proposers, top_k, seed, max_gen):
     """Run one configuration and return the result dict."""
-    # Temporarily override config
-    cfg.POPULATION_SIZE = pop_size
-    cfg.NUM_PROPOSERS   = proposers
-    cfg.TOP_K_PARENTS   = min(top_k, pop_size)   # top_k can't exceed pop size
-
+    actual_top_k = min(top_k, pop_size)
     rng       = random.Random(seed)
     scheduler = Scheduler(strategy="fixed_ratio", smart_ratio=0.0, rng=rng)
-    result    = run(scheduler=scheduler, seed=seed, verbose=False)
+    result    = run(
+        scheduler=scheduler,
+        seed=seed,
+        verbose=False,
+        max_generations=max_gen,
+        num_proposers=proposers,
+        population_size=pop_size,
+        top_k=actual_top_k,
+    )
 
     return {
-        "pop_size":         pop_size,
-        "proposers":        proposers,
-        "top_k":            min(top_k, pop_size),
-        "seed":             seed,
-        "best_score":       result.best_score,
+        "pop_size":          pop_size,
+        "proposers":         proposers,
+        "top_k":             actual_top_k,
+        "seed":              seed,
+        "best_score":        result.best_score,
         "total_evaluations": result.total_evaluations,
-        "reached_target":   result.reached_target,
-        "elapsed_sec":      result.elapsed_sec,
+        "reached_target":    result.reached_target,
+        "elapsed_sec":       result.elapsed_sec,
     }
 
 

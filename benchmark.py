@@ -16,9 +16,19 @@ The evaluator returns a score 0–100:
 
 from typing import Optional, List
 import random
+import signal
 import time
 import traceback
 from config import SEED, NUM_TEST_CASES
+
+
+# ── Timeout helper (Unix/macOS only) ─────────────────────────────────────────
+
+class _TimeoutError(Exception):
+    pass
+
+def _timeout_handler(signum, frame):
+    raise _TimeoutError("evaluation timed out")
 
 
 # ── Generate fixed test cases once, seeded ────────────────────────────────────
@@ -89,6 +99,7 @@ def evaluate(code: str, timeout: float = 5.0) -> EvaluationResult:
 
     The code must define a function called `sort_array(arr: list) -> list`.
     We run it in a restricted namespace and time it.
+    A hard timeout (default 5 s) kills infinite loops via SIGALRM.
     """
     namespace: dict = {}
 
@@ -112,20 +123,40 @@ def evaluate(code: str, timeout: float = 5.0) -> EvaluationResult:
             trace=None,
         )
 
-    # ── 2. correctness + speed ─────────────────────────────────────────────────
+    # ── 2. correctness + speed (with timeout) ─────────────────────────────────
     correct = 0
     last_error: Optional[str] = None
     last_trace: Optional[str] = None
+
+    # Set a hard alarm so infinite-loop mutations don't hang the process
+    old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+    signal.alarm(int(max(1, timeout)))
     start = time.perf_counter()
 
-    for tc, expected in zip(TEST_CASES, EXPECTED):
-        try:
-            result = fn(list(tc))          # pass a copy so tc is not mutated
-            if result == expected:
-                correct += 1
-        except Exception as exc:
-            last_error = str(exc)
-            last_trace = traceback.format_exc(limit=5)
+    try:
+        for tc, expected in zip(TEST_CASES, EXPECTED):
+            try:
+                result = fn(list(tc))      # pass a copy so tc is not mutated
+                if result == expected:
+                    correct += 1
+            except _TimeoutError:
+                raise                      # propagate to outer handler
+            except Exception as exc:
+                last_error = str(exc)
+                last_trace = traceback.format_exc(limit=5)
+    except _TimeoutError:
+        elapsed = time.perf_counter() - start
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
+        return EvaluationResult(
+            score=0.0, correct=correct, total=len(TEST_CASES),
+            speedup=0.0,
+            error=f"Timeout after {elapsed:.1f}s (infinite loop?)",
+            trace=None,
+        )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
     elapsed = time.perf_counter() - start
     speedup = BASELINE_TIME / elapsed if elapsed > 0 else 0.0

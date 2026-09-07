@@ -15,16 +15,18 @@ Both functions return a new code string (or None if mutation fails).
 
 from __future__ import annotations
 from typing import Optional, List, Dict, Tuple
+import os
 import random
 import re
-import anthropic
+from groq import Groq
 from benchmark import EvaluationResult
 from config import LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE
 
 
 # ── Smart Step (LLM-guided) ────────────────────────────────────────────────────
 
-_CLIENT = anthropic.Anthropic()   # reads ANTHROPIC_API_KEY from environment
+# Reads GROQ_API_KEY from environment — set with: export GROQ_API_KEY="gsk_..."
+_CLIENT = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
 _SYSTEM_PROMPT = """\
 You are an expert Python programmer helping improve a sorting algorithm.
@@ -60,19 +62,30 @@ def smart_step(code: str, eval_result: EvaluationResult) -> Optional[str]:
 
 Please propose an improved version of `sort_array`.
 """
-    try:
-        response = _CLIENT.messages.create(
-            model=LLM_MODEL,
-            max_tokens=LLM_MAX_TOKENS,
-            temperature=LLM_TEMPERATURE,
-            system=_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-        )
-        raw = response.content[0].text
-        return _extract_code(raw)
-    except Exception as exc:
-        print(f"  [smart_step] LLM call failed: {exc}")
-        return None
+    import time as _time
+    for attempt in range(3):   # retry up to 3 times on rate limit
+        try:
+            response = _CLIENT.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user",   "content": user_message},
+                ],
+                max_tokens=LLM_MAX_TOKENS,
+                temperature=LLM_TEMPERATURE,
+            )
+            raw = response.choices[0].message.content
+            return _extract_code(raw)
+        except Exception as exc:
+            msg = str(exc)
+            if "429" in msg and attempt < 2:
+                wait = 10 * (attempt + 1)
+                print(f"  [smart_step] Rate limited, retrying in {wait}s...")
+                _time.sleep(wait)
+            else:
+                print(f"  [smart_step] LLM call failed: {exc}")
+                return None
+    return None
 
 
 def _extract_code(text: str) -> str:

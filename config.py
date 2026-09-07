@@ -11,7 +11,7 @@ SEED = 42                   # fixed seed for all random operations
 # ── Population ────────────────────────────────────────────────────────────────
 POPULATION_SIZE  = 10       # number of programs kept alive at any time
 TOP_K_PARENTS    = 3        # how many top programs are selected as parents
-NUM_PROPOSERS    = 5        # candidates generated per mutation step (pick best)
+NUM_PROPOSERS    = 2        # candidates generated per mutation step (pick best)
 
 # ── Loop ──────────────────────────────────────────────────────────────────────
 MAX_GENERATIONS  = 50       # stop after this many generations
@@ -22,8 +22,9 @@ SMART_STEP_RATIO = 0.7      # fraction of steps that use the LLM (smart step)
                              # remaining (1 - ratio) use random mutation (dumb step)
 
 # ── LLM (Smart Step) ──────────────────────────────────────────────────────────
-LLM_MODEL        = "claude-haiku-4-5-20251001"   # fast + cheap for many calls
-LLM_MAX_TOKENS   = 1024
+LLM_PROVIDER     = "groq"                        # "groq" | "huggingface" | "anthropic"
+LLM_MODEL        = "qwen/qwen3.8-27b"            # Groq free model — strong at code
+LLM_MAX_TOKENS   = 800
 LLM_TEMPERATURE  = 0.8      # some creativity in mutations
 
 # ── Benchmark ─────────────────────────────────────────────────────────────────

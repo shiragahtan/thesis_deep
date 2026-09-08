@@ -312,6 +312,60 @@ heap sort, insertion sort), the dumb step became stronger:
     entirely due to the lucky insertion of quicksort — not any reasoning.
 \end{itemize}
 
+\subsection{Smart-Only vs Dumb-Only — First Comparison (Sorting)}
+
+\begin{center}
+\begin{tabular}{lccl}
+\toprule
+\textbf{Config} & \textbf{Final Score} & \textbf{Evaluations} & \textbf{Best algorithm found} \\
+\midrule
+Dumb-only & 74.2 & 100 & Quicksort (iterative, by lucky mutation) \\
+Smart-only & 71.9 & 101 & Shell sort + Sedgewick gaps + insertion sort hybrid \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Interpretation — why dumb beat smart on sorting:}
+\begin{itemize}
+  \item The dumb step's structural mutation library includes pre-written correct
+    implementations of quicksort, merge sort, heap sort, and insertion sort.
+    It can ``accidentally'' insert the right algorithm without any reasoning.
+  \item The smart step proposes \emph{more sophisticated} algorithms (Shell sort
+    with Sedgewick gaps, hybrid approaches), but pure-Python implementations of
+    these algorithms are slower than the pre-written iterative quicksort primitive.
+  \item The scoring signal on the sorting task is extremely hard to improve:
+    the baseline is Python's \texttt{sorted()} (Timsort, implemented in C).
+    No pure-Python algorithm can realistically approach 100/100.
+    This ``ceiling effect'' means both strategies plateau.
+  \item \textbf{The sorting benchmark may not be the best showcase for the smart
+    step.} The advantage of failure-informed mutation should be clearer on tasks
+    where the LLM must reason structurally (e.g.\ prime sieve, string search)
+    rather than compete with a C-implemented baseline.
+\end{itemize}
+
+\textbf{What the smart step \emph{did} demonstrate:}
+\begin{itemize}
+  \item In generation 1, the LLM immediately proposed merge sort — recognising from
+    the failure evidence (``speed: 0.02$\times$ baseline, correct but $O(n^2)$'')
+    that the algorithm needs to be fundamentally different.
+  \item By the final generation, the LLM had explored Shell sort, insertion sort
+    hybrids, and gap-sequence optimisations — all semantically meaningful responses
+    to the failure signal. The dumb step never ``understood'' why the code was slow.
+  \item The smart step maintained non-zero diversity (div=0.4) throughout all 50
+    generations, while dumb-only collapsed to div=0 by generation 15.
+\end{itemize}
+
+\subsection{Next Experiments (Planned)}
+
+\begin{enumerate}
+  \item \textbf{Primes and strings benchmarks}: the sieve and KMP are
+    achievable in pure Python with dramatic speedups — a better showcase
+    for smart-step reasoning.
+  \item \textbf{3 seeds per config}: for statistical significance.
+  \item \textbf{Mixed config} (70\% smart, 30\% dumb): the actual thesis proposal.
+  \item \textbf{Smart-only on matrix task}: can the LLM rediscover Strassen?
+\end{enumerate}
+
 \textbf{Interpretation}: This is exactly the motivation for the smart step.
 The LLM, given the failure evidence (``speed: 0.02$\times$ baseline, correct
 but $O(n^2)$''), should be able to propose a fundamentally different algorithm

@@ -25,10 +25,32 @@ import time
 from dataclasses import dataclass, asdict
 
 import config as _cfg
-from benchmark import evaluate, SEED_PROGRAM
 from mutator import smart_step, dumb_step
 from population import Population, Program
 from scheduler import Scheduler
+
+# ── Benchmark registry ────────────────────────────────────────────────────────
+
+def _load_benchmark(name: str):
+    """Return (evaluate_fn, seed_program, system_prompt_hint) for a benchmark."""
+    if name == "sorting":
+        from benchmark import evaluate, SEED_PROGRAM
+        hint = "sort_array(arr: list) -> list"
+        return evaluate, SEED_PROGRAM, hint
+    elif name == "matrix":
+        from benchmark_matrix import evaluate_matrix, SEED_PROGRAM_MATRIX
+        hint = "matmul(A: list, B: list) -> list"
+        return evaluate_matrix, SEED_PROGRAM_MATRIX, hint
+    elif name == "primes":
+        from benchmark_primes import evaluate_primes, SEED_PROGRAM_PRIMES
+        hint = "get_primes(n: int) -> list"
+        return evaluate_primes, SEED_PROGRAM_PRIMES, hint
+    elif name == "strings":
+        from benchmark_strings import evaluate_strings, SEED_PROGRAM_STRINGS
+        hint = "find_pattern(text: str, pattern: str) -> list"
+        return evaluate_strings, SEED_PROGRAM_STRINGS, hint
+    else:
+        raise ValueError(f"Unknown benchmark: '{name}'. Choose: sorting, matrix, primes, strings")
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────
@@ -66,6 +88,7 @@ def run(
     num_proposers: Optional[int] = None,
     population_size: Optional[int] = None,
     top_k: Optional[int] = None,
+    benchmark: str = "sorting",
 ) -> RunResult:
     """
     Run the full evolutionary search and return a RunResult.
@@ -86,13 +109,20 @@ def run(
     _pop_size    = population_size  if population_size  is not None else _cfg.POPULATION_SIZE
     _top_k       = top_k            if top_k            is not None else _cfg.TOP_K_PARENTS
 
+    # Load the requested benchmark
+    evaluate_fn, seed_program, fn_hint = _load_benchmark(benchmark)
+
+    # Update system prompt hint in mutator so LLM knows the right function name
+    import mutator as _mutator
+    _mutator._SYSTEM_PROMPT = _mutator._SYSTEM_PROMPT_TEMPLATE.format(fn_hint=fn_hint)
+
     rng       = random.Random(_seed)
     scheduler = scheduler or Scheduler(rng=rng)
     pop       = Population(max_size=_pop_size, top_k=min(_top_k, _pop_size))
 
     # ── seed the population with the baseline program ─────────────────────────
-    seed_eval = evaluate(SEED_PROGRAM)
-    pop.add(Program(code=SEED_PROGRAM, score=seed_eval.score,
+    seed_eval = evaluate_fn(seed_program)
+    pop.add(Program(code=seed_program, score=seed_eval.score,
                     eval_result=seed_eval, generation=0))
     if verbose:
         print(f"[Gen 0] Seed program score: {seed_eval.score:.1f}/100")
@@ -125,7 +155,7 @@ def run(
             if new_code is None:
                 continue
 
-            result = evaluate(new_code)
+            result = evaluate_fn(new_code)
             total_evals += 1
             candidates.append((new_code, result))
 

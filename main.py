@@ -40,6 +40,9 @@ def parse_args():
                    help="Random seed")
     p.add_argument("--quiet",       action="store_true",
                    help="Suppress progress output")
+    p.add_argument("--benchmark",   default="sorting",
+                   choices=["sorting", "matrix", "primes", "strings"],
+                   help="Which benchmark to optimize (default: sorting)")
     return p.parse_args()
 
 
@@ -65,7 +68,8 @@ def main():
 
     print(f"Seed: {args.seed}\n")
 
-    result = run(scheduler=scheduler, seed=args.seed, verbose=not args.quiet)
+    result = run(scheduler=scheduler, seed=args.seed, verbose=not args.quiet,
+                 benchmark=args.benchmark)
 
     print("\n── Best program found ────────────────────────────")
     print(result.best_code)

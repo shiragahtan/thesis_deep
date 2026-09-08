@@ -28,21 +28,24 @@ from config import LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE
 # Reads GROQ_API_KEY from environment — set with: export GROQ_API_KEY="gsk_..."
 _CLIENT = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-_SYSTEM_PROMPT = """\
-You are an expert Python programmer helping improve a sorting algorithm.
+_SYSTEM_PROMPT_TEMPLATE = """\
+You are an expert Python programmer helping optimize an algorithm.
 You will be shown:
   1. The current code
   2. How it performed (score, correctness, speed)
   3. Any error or failure evidence
 
-Your task: propose ONE improved version of the function `sort_array(arr: list) -> list`.
+Your task: propose ONE improved version of the function `{fn_hint}`.
 
 Rules:
 - Return ONLY the Python code block, no explanation.
-- The function must be named exactly `sort_array`.
-- Do not use Python's built-in `sorted()` or `list.sort()`.
+- The function signature must stay exactly the same.
+- Do not use Python's built-in sorting functions.
 - Make a targeted change based on the failure evidence.
 """
+
+# Default: sorting benchmark
+_SYSTEM_PROMPT = _SYSTEM_PROMPT_TEMPLATE.format(fn_hint="sort_array(arr: list) -> list")
 
 def smart_step(code: str, eval_result: EvaluationResult) -> Optional[str]:
     """
@@ -63,7 +66,7 @@ def smart_step(code: str, eval_result: EvaluationResult) -> Optional[str]:
 Please propose an improved version of `sort_array`.
 """
     import time as _time
-    for attempt in range(3):   # retry up to 3 times on rate limit
+    for attempt in range(4):   # retry up to 4 times on transient errors
         try:
             response = _CLIENT.chat.completions.create(
                 model=LLM_MODEL,
@@ -78,9 +81,12 @@ Please propose an improved version of `sort_array`.
             return _extract_code(raw)
         except Exception as exc:
             msg = str(exc)
-            if "429" in msg and attempt < 2:
-                wait = 10 * (attempt + 1)
-                print(f"  [smart_step] Rate limited, retrying in {wait}s...")
+            is_transient = ("429" in msg or "Connection error" in msg
+                            or "timeout" in msg.lower() or "502" in msg
+                            or "503" in msg)
+            if is_transient and attempt < 3:
+                wait = 15 * (attempt + 1)   # 15s, 30s, 45s
+                print(f"  [smart_step] Transient error (attempt {attempt+1}), retrying in {wait}s...")
                 _time.sleep(wait)
             else:
                 print(f"  [smart_step] LLM call failed: {exc}")

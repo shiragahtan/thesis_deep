@@ -124,8 +124,10 @@ The implementation is modular, with each concern in its own file:
 \textbf{File} & \textbf{Responsibility} \\
 \midrule
 \texttt{config.py}          & All hyperparameters in one place \\
-\texttt{benchmark.py}       & Fixed sorting task; evaluator returning score 0--100 \\
-\texttt{benchmark\_matrix.py} & Second task: matrix multiplication \\
+\texttt{benchmark.py}        & Sorting task; evaluator returning score 0--100 \\
+\texttt{benchmark\_matrix.py} & Matrix multiplication task \\
+\texttt{benchmark\_primes.py} & Prime number generation task \\
+\texttt{benchmark\_strings.py} & Substring search task \\
 \texttt{population.py}      & Population of programs; weighted parent selection \\
 \texttt{mutator.py}         & Smart step (LLM) and dumb step (random + structural) \\
 \texttt{evaluators.py}      & Multiple scoring variants (combined, correctness, speed) \\
@@ -191,75 +193,123 @@ Four scoring functions are implemented in \texttt{evaluators.py}:
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Benchmark Tasks}
 
-\subsection{Sorting (Primary)}
+We test on four benchmark tasks spanning different algorithmic domains.
+Each task has a correct-but-slow seed program and a well-known fast target,
+so the LLM's ability to read failure evidence and propose a better algorithm
+is directly testable.
 
-\textbf{Task}: Optimize a \texttt{sort\_array(arr: list) -> list} function.
-
-\textbf{Seed program}: Selection sort ($O(n^2)$).
-
-\textbf{Scoring}:
+The general scoring formula is:
 \[
-  \text{score} = 70 \cdot \frac{\text{correct}}{\text{total}} + \min\!\left(30,\; 30 \cdot \frac{t_{\text{baseline}}}{t_{\text{candidate}}}\right)
+  \text{score} = w_c \cdot \frac{\text{correct}}{\text{total}} + \min\!\left(w_s,\; w_s \cdot \frac{t_{\text{baseline}}}{t_{\text{candidate}}}\right)
 \]
 
-\textbf{Test cases}: 20 fixed arrays (seed 42), sizes 10--200, values
-$[-1000, 1000]$.
+\begin{center}
+\begin{tabular}{llllccc}
+\toprule
+\textbf{Task} & \textbf{Function} & \textbf{Seed} & \textbf{Target} & \textbf{Seed score} & $w_c$ & $w_s$ \\
+\midrule
+Sorting        & \texttt{sort\_array(arr)}     & Selection sort $O(n^2)$      & Merge/Quicksort $O(n\log n)$ & 70.8 & 70 & 30 \\
+Matrix mult.   & \texttt{matmul(A, B)}         & Naive $O(n^3)$               & Strassen-like               & 95.3 & 60 & 40 \\
+Prime sieve    & \texttt{get\_primes(n)}       & Trial division $O(n\sqrt{n})$ & Sieve of Eratosthenes        & 74.8 & 70 & 30 \\
+String search  & \texttt{find\_pattern(t, p)}  & Naive $O(nm)$                & KMP / built-in find         & 73.1 & 70 & 30 \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\textbf{Why sorting?} It is deterministic, fully reproducible, gradable on
-two axes (correctness + speed), and directly analogous to AlphaEvolve's
-matrix multiplication task.
+\subsection{Sorting}
 
-\subsection{Matrix Multiplication (Second Benchmark)}
+\textbf{Seed}: Selection sort — $O(n^2)$, always correct, very slow.
+\textbf{Baseline}: Python's built-in \texttt{sorted()} (Timsort, implemented in C).
+\textbf{Test cases}: 20 fixed arrays (seed 42), sizes 10--200, values $[-1000, 1000]$.
 
-\textbf{Task}: Optimize a \texttt{matmul(A, B) -> list} function.
+The starting score of 70.8 reflects full correctness (70 pts) but almost no speed
+points (selection sort is $\sim$50$\times$ slower than Timsort). The LLM,
+reading ``speed: 0.02$\times$ baseline'', should reason towards merge sort or quicksort.
 
-\textbf{Seed program}: Naive $O(n^3)$ triple-loop multiplication.
+\subsection{Matrix Multiplication}
 
-\textbf{Scoring}: $60\%$ correctness $+$ $40\%$ speed.
+\textbf{Seed}: Naive $O(n^3)$ triple-loop multiplication.
+\textbf{Baseline}: Same naive algorithm (the seed \emph{is} the baseline here — the
+interesting improvement is discovering Strassen-like sub-cubic algorithms).
+\textbf{Test cases}: 15 cases ($5 \times$ each of $2\times2$, $4\times4$, $8\times8$ matrices).
 
-\textbf{Test cases}: 15 cases ($5 \times$ each of $2\times2$, $4\times4$, $8\times8$
-matrices).
+This task directly mirrors AlphaEvolve's headline result (beating Strassen after
+56 years). Our framework tests whether a free LLM can rediscover known improvements.
 
-\textbf{Why matrix multiplication?} This is exactly the task where AlphaEvolve
-made its headline result. Running our framework on this task directly compares
-to the AlphaEvolve baseline.
+\subsection{Prime Number Generation}
+
+\textbf{Seed}: Trial division — $O(n\sqrt{n})$, correct but slow.
+\textbf{Baseline}: Sieve of Eratosthenes — $O(n \log \log n)$.
+\textbf{Test cases}: 10 fixed upper bounds $N \in [100, 5000]$ (seed 42).
+
+Starting score 74.8 (correct but $\sim$6$\times$ slower than the sieve).
+The LLM failure signal ``speed: 0.16$\times$ baseline'' should motivate
+switching to the sieve structure.
+
+\subsection{Substring Search}
+
+\textbf{Seed}: Brute-force substring scan — $O(nm)$ per search.
+\textbf{Baseline}: Python's built-in \texttt{str.find()} (Boyer-Moore-Horspool in C).
+\textbf{Test cases}: 15 fixed (text, pattern) pairs; text lengths 200--2000, pattern 3--15 chars.
+
+Starting score 73.1 (correct but $\sim$10$\times$ slower than \texttt{str.find}).
+The LLM should propose KMP or similar prefix-table approaches.
 
 % ─────────────────────────────────────────────────────────────────────────────
 \section{Preliminary Results}
 
-\subsection{Dumb-Only Baseline (6 Seeds)}
+\subsection{Dumb-Only Baseline — Sorting Task}
 
-We ran the dumb-only configuration (equivalent to AlphaEvolve's blind mutation)
-across 6 random seeds to establish a robust baseline.
+\textbf{Configuration}: 50 generations, 2 proposers, population size 10, top-$K$=3.
+This is equivalent to AlphaEvolve's blind mutation baseline.
+
+\subsubsection{Early runs (5 proposers, 6 seeds)}
+
+Before adding structural mutations, we ran the original 5-proposer dumb-only
+across 6 seeds:
 
 \begin{center}
 \begin{tabular}{cccc}
 \toprule
-\textbf{Seed} & \textbf{Start Score} & \textbf{Final Score} & \textbf{Target (95) Reached?} \\
+\textbf{Seed} & \textbf{Start} & \textbf{Final} & \textbf{Target (95)?} \\
 \midrule
-42  & 70.4 & 71.6 & \texttimes \\
-1   & 70.4 & 72.2 & \texttimes \\
-7   & 70.4 & 70.5 & \texttimes \\
-13  & 70.4 & 70.5 & \texttimes \\
-21  & 70.4 & 70.5 & \texttimes \\
-99  & 70.4 & 70.5 & \texttimes \\
+42 & 70.4 & 71.6 & \texttimes \\
+1  & 70.4 & 72.2 & \texttimes \\
+7  & 70.4 & 70.5 & \texttimes \\
+13 & 70.4 & 70.5 & \texttimes \\
+21 & 70.4 & 70.5 & \texttimes \\
+99 & 70.4 & 70.5 & \texttimes \\
 \midrule
 \textbf{Mean} & \textbf{70.4} & \textbf{71.1} & \textbf{0/6} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
+\subsubsection{Improved dumb step (structural mutations, 2 proposers)}
+
+After adding structural mutations (insert sorting primitive: quicksort, merge sort,
+heap sort, insertion sort), the dumb step became stronger:
+
+\begin{center}
+\begin{tabular}{ccccc}
+\toprule
+\textbf{Seed} & \textbf{Start} & \textbf{Final} & \textbf{Evals} & \textbf{Best algorithm found} \\
+\midrule
+42 & 70.3 & 74.2 & 100 & Quicksort (iterative) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
 \textbf{Key observations}:
 \begin{itemize}
-  \item Blind random mutation is unable to escape the selection sort basin.
-    All 6 runs plateau at 70--73 within 15 generations.
-  \item Population diversity collapses to 0.0 by generation $\approx$15 in
-    every run. Once everyone in the population is the same program, dumb steps
-    produce only broken variants that fail to score higher.
-  \item The ``best'' program found by dumb-only is selection sort with minor
-    cosmetic edits (e.g.\ a duplicated \texttt{return} line).
-  \item All 251 evaluations are consumed (50 generations $\times$ 5 proposers
-    $+$ 1 seed), yet the target score of 95 is never reached.
+  \item Even with structural mutations that can ``insert quicksort'', the dumb
+    step cannot go beyond 74.2. The structural mutation is random — it cannot
+    \emph{reason} about why the algorithm is slow and choose the right fix.
+  \item The population diversity collapses to near 0 by generation 20 in all runs.
+  \item \textbf{The target score of 95 is never reached by dumb-only},
+    regardless of seeds or structural mutation variants.
+  \item The improvement from 71.1 to 74.2 (between old and new dumb step) is
+    entirely due to the lucky insertion of quicksort — not any reasoning.
 \end{itemize}
 
 \textbf{Interpretation}: This is exactly the motivation for the smart step.

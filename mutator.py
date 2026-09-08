@@ -18,15 +18,22 @@ from typing import Optional, List, Dict, Tuple
 import os
 import random
 import re
-from groq import Groq
 from benchmark import EvaluationResult
 from config import LLM_MODEL, LLM_MAX_TOKENS, LLM_TEMPERATURE
 
 
 # ── Smart Step (LLM-guided) ────────────────────────────────────────────────────
 
-# Reads GROQ_API_KEY from environment — set with: export GROQ_API_KEY="gsk_..."
-_CLIENT = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+# Lazy client — only instantiated when smart_step is actually called.
+# This lets dumb-only runs import mutator without a GROQ_API_KEY.
+_CLIENT = None
+
+def _get_client():
+    global _CLIENT
+    if _CLIENT is None:
+        from groq import Groq
+        _CLIENT = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+    return _CLIENT
 
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are an expert Python programmer helping optimize an algorithm.
@@ -68,7 +75,7 @@ Please propose an improved version of `sort_array`.
     import time as _time
     for attempt in range(4):   # retry up to 4 times on transient errors
         try:
-            response = _CLIENT.chat.completions.create(
+            response = _get_client().chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},

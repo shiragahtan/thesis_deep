@@ -355,15 +355,80 @@ Smart-only & 71.9 & 101 & Shell sort + Sedgewick gaps + insertion sort hybrid \\
     generations, while dumb-only collapsed to div=0 by generation 15.
 \end{itemize}
 
+\subsection{Smart-Only vs Dumb-Only — Prime Number Generation}
+
+This benchmark is the clearest demonstration of the thesis contribution.
+The dumb step has no sieve primitive to insert — it is structurally blind.
+The smart step, reading the failure evidence, can reason towards the sieve.
+
+\begin{center}
+\begin{tabular}{lccccl}
+\toprule
+\textbf{Config} & \textbf{Score} & \textbf{Evals} & \textbf{Time} & \textbf{Target?} & \textbf{Best algorithm} \\
+\midrule
+Dumb-only  & 75.3  & 77 & 0.2s  & \texttimes & Trial division + cosmetic edits \\
+Smart-only & \textbf{100.0} & \textbf{9} & 44s & \checkmark (gen 4) & Sieve of Eratosthenes (bytearray) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Key result}: The smart step achieved \textbf{perfect score (100/100) in 9 evaluations}
+— the dumb step was stuck at 75.3 after 77 evaluations.
+This is an $\mathbf{8.5\times}$ improvement in sample efficiency.
+
+The LLM-generated solution:
+\begin{lstlisting}
+def get_primes(n: int) -> list:
+    """Sieve of Eratosthenes - O(n log log n)."""
+    if n < 2:
+        return []
+    sieve = bytearray(b'\x01') * (n + 1)
+    sieve[0:2] = b'\x00\x00'
+    for i in range(2, int(n**0.5) + 1):
+        if sieve[i]:
+            sieve[i*i::i] = bytearray(len(sieve[i*i::i]))
+    return [i for i, is_p in enumerate(sieve) if is_p]
+\end{lstlisting}
+
+The LLM read ``speed: 0.17$\times$ sieve baseline'' and immediately proposed the
+Sieve of Eratosthenes — with a \texttt{bytearray} optimisation for memory
+efficiency. The dumb step made only cosmetic edits (duplicate lines, perturbed
+constants) and never discovered the fundamentally different algorithm.
+
+\subsection{Summary Across Benchmarks}
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Benchmark} & \textbf{Dumb score} & \textbf{Smart score} & \textbf{Smart evals} & \textbf{Winner} \\
+\midrule
+Sorting  & 74.2 & 71.9 & 101 & Dumb (ceiling effect) \\
+Primes   & 75.3 & 100.0 & 9  & \textbf{Smart ($8.5\times$ efficiency)} \\
+Strings  & TBD  & TBD   & —  & Pending \\
+Matrix   & TBD  & TBD   & —  & Pending \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Interpretation}: The sorting benchmark has a ``ceiling effect'' — the
+baseline is Python's Timsort in C, unreachable by any pure-Python algorithm.
+Both strategies plateau. The primes benchmark removes this ceiling: the sieve
+is achievable in pure Python and delivers a dramatic speedup. Here, the smart
+step's ability to \emph{reason} about the failure is decisive.
+
+\textbf{This is the core thesis finding}: failure-informed mutation is most
+valuable when the search requires a \emph{structural insight} (e.g.\ ``use a
+sieve'') rather than a numerical tweak. The dumb step can get lucky with
+pre-coded primitives on tasks where those primitives exist — but cannot
+generalise to tasks where no such primitives are available.
+
 \subsection{Next Experiments (Planned)}
 
 \begin{enumerate}
-  \item \textbf{Primes and strings benchmarks}: the sieve and KMP are
-    achievable in pure Python with dramatic speedups — a better showcase
-    for smart-step reasoning.
+  \item \textbf{Strings benchmark}: smart vs dumb on substring search.
+  \item \textbf{Matrix benchmark}: can the LLM propose Strassen-like ideas?
   \item \textbf{3 seeds per config}: for statistical significance.
-  \item \textbf{Mixed config} (70\% smart, 30\% dumb): the actual thesis proposal.
-  \item \textbf{Smart-only on matrix task}: can the LLM rediscover Strassen?
+  \item \textbf{Mixed config} (70\% smart, 30\% dumb): the thesis proposal.
 \end{enumerate}
 
 \textbf{Interpretation}: This is exactly the motivation for the smart step.

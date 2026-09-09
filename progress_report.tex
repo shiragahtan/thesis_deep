@@ -395,40 +395,86 @@ Sieve of Eratosthenes — with a \texttt{bytearray} optimisation for memory
 efficiency. The dumb step made only cosmetic edits (duplicate lines, perturbed
 constants) and never discovered the fundamentally different algorithm.
 
-\subsection{Summary Across Benchmarks}
+\subsection{Multi-Seed Dumb-Only Results (4 seeds $\times$ 4 benchmarks)}
+
+To establish a statistically robust baseline, we ran the dumb-only configuration
+across 4 random seeds (42, 1, 7, 99) on all four benchmarks. Results are
+remarkably consistent — the variance across seeds is tiny, confirming that
+the dumb step's ceiling is a property of the \emph{strategy}, not random luck.
 
 \begin{center}
 \begin{tabular}{lcccc}
 \toprule
-\textbf{Benchmark} & \textbf{Dumb score} & \textbf{Smart score} & \textbf{Smart evals} & \textbf{Winner} \\
+\textbf{Benchmark} & \textbf{Seed 42} & \textbf{Seed 1} & \textbf{Seed 7} & \textbf{Seed 99} \\
 \midrule
-Sorting  & 74.2 & 71.9 & 101 & Dumb (ceiling effect) \\
-Primes   & 75.3 & 100.0 & 9  & \textbf{Smart ($8.5\times$ efficiency)} \\
-Strings  & 74.3 & TBD (running) & —  & Smart pending \\
-Matrix   & TBD  & TBD   & —  & Pending \\
+Sorting (score / evals) & 74.2 / 100 & 72.2 / 99 & 73.0 / 97 & 71.8 / 98 \\
+Primes  (score / evals) & 75.3 / 77  & 75.0 / 77 & 75.5 / 76 & 75.3 / 74 \\
+Strings (score / evals) & 74.3 / 81  & 73.7 / 84 & 73.4 / 88 & 72.8 / 79 \\
+Matrix  (score / evals) & 98.6 / 5   & 95.9 / 3  & 99.6 / 2  & 95.6 / 3  \\
+\midrule
+\textbf{Target (95) reached?} & & & & \\
+Sorting & \texttimes & \texttimes & \texttimes & \texttimes \\
+Primes  & \texttimes & \texttimes & \texttimes & \texttimes \\
+Strings & \texttimes & \texttimes & \texttimes & \texttimes \\
+Matrix  & \checkmark & \checkmark & \checkmark & \checkmark \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\textbf{Interpretation}: The sorting benchmark has a ``ceiling effect'' — the
-baseline is Python's Timsort in C, unreachable by any pure-Python algorithm.
-Both strategies plateau. The primes benchmark removes this ceiling: the sieve
-is achievable in pure Python and delivers a dramatic speedup. Here, the smart
-step's ability to \emph{reason} about the failure is decisive.
+\textbf{Observations}:
+\begin{itemize}
+  \item \textbf{Sorting, Primes, Strings}: dumb-only consistently plateaus between
+    71--75, never reaching 95. Score variance across seeds $< 2$ points. The
+    ceiling is structural, not random.
+  \item \textbf{Matrix}: reaches 95+ in 2--5 evaluations regardless of seed.
+    This is a ``trivial task'' effect: the naive triple-loop baseline and seed
+    are the same algorithm, so timing noise alone can push the score over 95.
+    Matrix is therefore \emph{not a meaningful benchmark} for comparing
+    strategies — both smart and dumb will solve it trivially.
+  \item The three meaningful benchmarks (sorting, primes, strings) show
+    that \textbf{the dumb step has a hard ceiling near 75/100}, set by the
+    limits of random syntactic mutation without reasoning.
+\end{itemize}
 
-\textbf{This is the core thesis finding}: failure-informed mutation is most
-valuable when the search requires a \emph{structural insight} (e.g.\ ``use a
-sieve'') rather than a numerical tweak. The dumb step can get lucky with
-pre-coded primitives on tasks where those primitives exist — but cannot
-generalise to tasks where no such primitives are available.
+\subsection{Summary: Smart vs Dumb Across Benchmarks}
+
+\begin{center}
+\begin{tabular}{lccccl}
+\toprule
+\textbf{Benchmark} & \textbf{Dumb avg score} & \textbf{Smart score} & \textbf{Dumb evals} & \textbf{Smart evals} & \textbf{Winner} \\
+\midrule
+Sorting  & 72.8 & 71.9 & $\sim$99 & 101 & $\approx$Tie (ceiling) \\
+Primes   & 75.3 & \textbf{100.0} & $\sim$76 & \textbf{9}  & \textbf{Smart ($8.5\times$)} \\
+Strings  & 73.6 & TBD & $\sim$83 & — & Smart pending \\
+Matrix   & 97.4 & TBD & $\sim$3  & — & Trivial (skip) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Interpretation}:
+\begin{itemize}
+  \item The sorting benchmark has a ceiling effect — the baseline is Python's
+    Timsort in C. No pure-Python algorithm can approach it, so both strategies plateau.
+  \item The primes benchmark is the \textbf{clearest result}: 100.0 vs 75.3,
+    and $8.5\times$ fewer evaluations. The LLM read the failure signal and
+    proposed the Sieve of Eratosthenes; the dumb step made only cosmetic edits.
+  \item \textbf{This is the core thesis finding}: failure-informed mutation
+    is decisive when the task requires a \emph{structural algorithmic insight}
+    (``use a sieve''), not just a numerical tweak. The dumb step cannot reason —
+    it can only get lucky, and luck runs out when no pre-coded primitive matches
+    the required insight.
+\end{itemize}
 
 \subsection{Next Experiments (Planned)}
 
 \begin{enumerate}
-  \item \textbf{Strings benchmark}: smart vs dumb on substring search.
-  \item \textbf{Matrix benchmark}: can the LLM propose Strassen-like ideas?
-  \item \textbf{3 seeds per config}: for statistical significance.
-  \item \textbf{Mixed config} (70\% smart, 30\% dumb): the thesis proposal.
+  \item \textbf{Strings smart-only} — does the LLM propose KMP or Boyer-Moore
+    from the ``speed: 0.10$\times$ baseline'' signal?
+  \item \textbf{Mixed config} (70\% smart + 30\% dumb) — the actual thesis
+    proposal. Tests whether diversity from random mutation helps a predominantly
+    smart search.
+  \item \textbf{3 smart seeds per benchmark} — statistical significance for
+    the smart step, mirroring the dumb multi-seed above.
 \end{enumerate}
 
 \textbf{Interpretation}: This is exactly the motivation for the smart step.

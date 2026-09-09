@@ -658,34 +658,196 @@ r = evaluate(bad, timeout=2)
 # -> score=0.0, error="Timeout after 2.0s (infinite loop?)"
 \end{lstlisting}
 
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Analysis and Discussion}
+
+\subsection{Q1 — Sample Efficiency: Does Failure-Informed Mutation Help?}
+
+\textbf{Answer: Yes, decisively — but only when the task requires structural reasoning.}
+
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Benchmark} & \textbf{Dumb evals} & \textbf{Smart evals} & \textbf{Speedup} & \textbf{Target reached?} \\
+\midrule
+Sorting  & 100 (no target) & 101 (no target) & $1.0\times$ & Neither \\
+Primes   & 77  (no target) & \textbf{9}      & $\mathbf{8.5\times}$ & Smart only \\
+Strings  & 81  (no target) & \textbf{51}     & $\mathbf{1.6\times}$ & Smart only \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On the primes benchmark, the smart step needed $8.5\times$ fewer evaluations
+and actually reached the target; the dumb step never did.
+On strings, the smart step was $1.6\times$ more efficient and also reached the target.
+On sorting, both strategies fail equally — explained by the ceiling effect
+(Section~\ref{sec:ceiling}).
+
+\textbf{Statistical robustness}: The dumb-only ceiling (72--75) was confirmed
+across 4 random seeds with variance $<$2 points, so the gap is not noise.
+
+\subsection{Q2 — When Does the Smart Step Help Most?}
+\label{sec:q2}
+
+\textbf{Answer: In the early generations — it makes the critical algorithmic leap
+immediately, then refines.}
+
+Looking at the primes generation history:
+\begin{itemize}
+  \item Gen 1: $75.1 \to 82.6$ — LLM immediately began restructuring
+  \item Gen 2: $82.6 \to 89.1$ — further refinement
+  \item Gen 4: $89.1 \to 100.0$ — Sieve with \texttt{bytearray} proposed
+\end{itemize}
+
+And for strings:
+\begin{itemize}
+  \item Gen 2: $72.7 \to 82.7$ — LLM switched from brute-force to a smarter loop
+  \item Gen 5: $83.9 \to 87.0$ — incremental improvement
+  \item Gen 10: $87.0 \to 94.9$ — near-target with \texttt{str.find()} approach
+  \item Gen 25: $94.9 \to 97.4$ — final refinement
+\end{itemize}
+
+In both cases, the \emph{algorithmic insight} happens in the first 5--10 generations.
+The remaining generations are refinement within the new paradigm.
+This suggests the smart step's primary value is \textbf{early exploration}:
+escaping the initial basin by reasoning about \emph{why} the seed is slow.
+
+\subsection{Q3 — Smart/Dumb Balance: What Is the Optimal Ratio?}
+\label{sec:q3}
+
+\textbf{Status: Pending mixed-config experiments. Preliminary analysis below.}
+
+The diversity data from the sorting benchmark is informative:
+\begin{itemize}
+  \item Dumb-only: diversity collapses to $\approx 0$ by generation 15.
+    All individuals converge to the same quicksort variant inserted by the
+    structural mutation.
+  \item Smart-only: diversity stays at $\approx 0.4$ throughout all 50 generations.
+    The LLM keeps proposing structurally different algorithms (Shell sort,
+    merge sort, hybrid approaches), maintaining population variety.
+\end{itemize}
+
+This motivates the \textbf{mixed config}: if the population has converged
+(smart-only collapses too), injecting random dumb mutations can re-introduce
+diversity. The planned 70\% smart + 30\% dumb ratio is designed to maintain
+the LLM's semantic reasoning while using random mutation as a diversity engine.
+
+\subsection{Q4 — LLM Convergence: Does the Population Become Homogeneous?}
+\label{sec:q4}
+
+\textbf{Answer: Less than dumb-only, but convergence still occurs after the
+key insight is found.}
+
+The smart step diversity data (Fig.~\ref{fig:sorting}) shows:
+\begin{itemize}
+  \item Diversity stays non-zero throughout — the LLM explores different
+    algorithms each generation (different proposals due to temperature=0.8).
+  \item However, once the LLM converges on the right approach (e.g.\ the
+    sieve on primes), subsequent proposals are refinements within that family.
+    This is \emph{exploit} mode — not collapse in the pathological sense.
+\end{itemize}
+
+Measuring diversity by score std-dev understates the true diversity, since
+many distinct algorithms can achieve the same score. A more rigorous
+measure (token overlap, AST edit distance) is planned for future work.
+
+\subsection{Q5 — Failure Signal: Which Component Matters?}
+
+\textbf{Status: Pending ablation experiments. Current evidence below.}
+
+In the current implementation, the LLM receives the full failure evidence:
+\[
+  E(x_t) = \{\text{score}, \text{correct}/\text{total}, \text{speedup}, \text{error}, \text{trace}\}
+\]
+
+The most impactful component observed so far is \textbf{speedup}:
+\begin{itemize}
+  \item Primes: LLM saw ``speedup: 0.17$\times$'' and immediately proposed
+    a sieve. Without this signal, the LLM would not know \emph{how slow}
+    the trial division is relative to the target.
+  \item Strings: LLM saw ``speedup: 0.09$\times$'' and reasoned towards
+    a C-backed \texttt{str.find()} call.
+\end{itemize}
+
+The correctness signal matters less on these benchmarks (both seeds were
+already 100\% correct). The error/trace signal would matter more on tasks
+where the seed has bugs.
+
+\subsection{The Ceiling Effect}
+\label{sec:ceiling}
+
+The sorting benchmark revealed a structural limitation: when the \textbf{baseline
+is implemented in C} (Python's Timsort), no pure-Python algorithm can approach
+the target score of 95. This is not a failure of either strategy — it is a
+property of the benchmark.
+
+\textbf{Lesson for benchmark design}: The baseline must be achievable in the
+mutation language. For this thesis, the three meaningful benchmarks are
+primes (sieve is achievable in Python), strings (str.find() is accessible
+from Python), and sorting is useful as a negative control showing that
+both strategies fail equally when no Python solution can win.
+
+\subsection{Why Smart Wins: The Core Argument}
+
+The key theoretical insight this experiment supports is:
+
+\begin{quote}
+\textit{Failure-informed mutation is most valuable when the search requires
+a structural algorithmic insight — a change in \emph{approach}, not just a
+change in \emph{parameters}. Random mutation can stumble upon the right
+parameters; it cannot reason towards the right approach.}
+\end{quote}
+
+Concretely:
+\begin{itemize}
+  \item The dumb step can change \texttt{range(n)} to \texttt{range(n-1)},
+    swap a \texttt{<} for a \texttt{<=}, or insert a pre-written quicksort.
+    These are \textbf{syntactic mutations}.
+  \item The smart step can read ``this is O(n$^2$) trial division running at
+    0.17$\times$ the sieve baseline'' and conclude ``I should implement a
+    sieve''. This is \textbf{semantic reasoning}.
+\end{itemize}
+
+The experimental results confirm: on tasks where the required insight is
+``use a completely different algorithm'' (primes, strings), the smart step
+wins decisively. On tasks where no Python algorithm can win regardless (sorting),
+both strategies plateau at the same ceiling.
+
+% ─────────────────────────────────────────────────────────────────────────────
 \section{Next Steps}
 
 \subsection{Remaining Experiments (require Groq API)}
 \begin{enumerate}
-  \item \textbf{Strings smart-only}: run \texttt{python3 main.py --smart-only
-    --benchmark strings}. Expected to show LLM proposing KMP/Boyer-Moore.
-  \item \textbf{Mixed config} (70\% smart + 30\% dumb) on primes:
-    \texttt{python3 main.py --smart-ratio 0.7 --benchmark primes}.
-    This is the actual thesis proposal — not just the extremes.
-  \item \textbf{3 smart seeds per benchmark}: mirror the dumb multi-seed table
-    (Section~\ref{sec:results}) for the smart step to report mean $\pm$ std.
+  \item \textbf{Mixed config} (70\% smart + 30\% dumb) on primes and strings —
+    the actual thesis proposal. Does blending random diversity with semantic
+    reasoning beat pure smart-only?
+    \begin{lstlisting}[numbers=none]
+python3 main.py --smart-ratio 0.7 --seed 42 --benchmark primes
+python3 main.py --smart-ratio 0.7 --seed 42 --benchmark strings
+    \end{lstlisting}
+  \item \textbf{3 more smart seeds per benchmark} — for mean $\pm$ std:
+    \begin{lstlisting}[numbers=none]
+for seed in 1 7 99; do
+  python3 main.py --smart-only --seed $seed --benchmark primes
+  python3 main.py --smart-only --seed $seed --benchmark strings
+done
+    \end{lstlisting}
 \end{enumerate}
 
-\subsection{Analysis and Writing}
+\subsection{Ablation Studies}
 \begin{enumerate}
-  \item Write Research Question analysis section: answer each RQ with the
-    data collected so far.
-  \item Diversity collapse study: measure token-level similarity (not just
-    score std-dev) to show population homogeneity.
-  \item Ablation of $E(x_t)$ components: does removing the stack trace or
-    score from the LLM context degrade sample efficiency?
+  \item \textbf{Failure signal ablation}: remove components of $E(x_t)$ one
+    at a time (score only, correctness only, no trace) and measure sample
+    efficiency. Tests Q5.
+  \item \textbf{Diversity measure}: compute token-level overlap or AST edit
+    distance between population members, not just score std-dev.
 \end{enumerate}
 
 \subsection{Long Term}
 \begin{enumerate}
   \item Island model: $k$ independent populations with periodic migration.
-  \item Scale to real competitive-programming benchmarks (LeetCode Hard).
-  \item Formal proof: under what conditions does failure-informed mutation
+  \item Scale to competitive-programming benchmarks (LeetCode Hard, USACO).
+  \item Formal analysis: under what conditions does failure-informed mutation
     converge faster than blind mutation in expectation?
 \end{enumerate}
 

@@ -36,6 +36,8 @@ RESULT_MAP = {
     ("strings",  "smart", 42): "results/run_1788980054.json",
     # Matrix
     ("matrix",   "dumb",  42): "results/run_1788962853.json",
+    # Mixed config
+    ("primes",   "mixed", 42): "results/run_1788980442.json",
 }
 
 # Dumb multi-seed results (scores only — from terminal output, no JSON per-seed yet)
@@ -48,6 +50,7 @@ DUMB_MULTISEED = {
 COLORS = {
     "smart": "#2E86AB",   # blue
     "dumb":  "#E84855",   # red
+    "mixed": "#F4A261",   # orange
 }
 
 os.makedirs("figures", exist_ok=True)
@@ -282,6 +285,53 @@ def fig5_strings():
     plt.close()
     print("✓ figures/fig5_score_vs_evals_strings.png")
 
+# ── Figure 6: All three configs on primes (the key 3-way comparison) ──────────
+
+def fig6_primes_threeway():
+    smart = load(("primes", "smart", 42))
+    dumb  = load(("primes", "dumb",  42))
+    mixed = load(("primes", "mixed", 42))
+    if not smart or not dumb or not mixed:
+        print("fig6: missing data, skipping"); return
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+
+    se, ss = score_curve(smart)
+    de, ds = score_curve(dumb)
+    me, ms = score_curve(mixed)
+
+    ax.plot(se, ss, color=COLORS["smart"], linewidth=2.5, marker='o', markersize=5,
+            label=f"Smart-only (100% LLM)    →  {smart['best_score']:.0f}/100 in {smart['total_evaluations']} evals")
+    ax.plot(me, ms, color=COLORS["mixed"], linewidth=2.5, marker='^', markersize=5,
+            label=f"Mixed (70% smart+30% dumb)  →  {mixed['best_score']:.0f}/100 in {mixed['total_evaluations']} evals")
+    ax.plot(de, ds, color=COLORS["dumb"],  linewidth=2.5, marker='s', markersize=5,
+            label=f"Dumb-only (0% LLM)       →  {dumb['best_score']:.1f}/100 in {dumb['total_evaluations']} evals (no target)")
+
+    ax.axhline(95, color="gray", linestyle="--", linewidth=1.2, label="Target (95)")
+
+    ax.annotate(f"{smart['best_score']:.0f}/100\n({smart['total_evaluations']} evals)",
+                xy=(smart['total_evaluations'], smart['best_score']),
+                xytext=(8, -18), textcoords='offset points',
+                arrowprops=dict(arrowstyle='->', color=COLORS["smart"]),
+                color=COLORS["smart"], fontsize=9, fontweight='bold')
+    ax.annotate(f"{mixed['best_score']:.0f}/100\n({mixed['total_evaluations']} evals)",
+                xy=(mixed['total_evaluations'], mixed['best_score']),
+                xytext=(8, 5), textcoords='offset points',
+                color=COLORS["mixed"], fontsize=9, fontweight='bold')
+
+    ax.set_xlabel("Evaluations", fontsize=12)
+    ax.set_ylabel("Best score / 100", fontsize=12)
+    ax.set_title("Prime Number Generation: All Three Configs\n"
+                 "Smart-only fastest; mixed also solves it; dumb never does", fontsize=13)
+    ax.legend(fontsize=9, loc="lower right")
+    ax.set_ylim(60, 108)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("figures/fig6_primes_threeway.png", dpi=150)
+    plt.close()
+    print("✓ figures/fig6_primes_threeway.png")
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -291,4 +341,5 @@ if __name__ == "__main__":
     fig3_comparison()
     fig4_sorting()
     fig5_strings()
+    fig6_primes_threeway()
     print("\nAll figures saved to figures/")

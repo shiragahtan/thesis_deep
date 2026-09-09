@@ -554,14 +554,57 @@ appropriate tool. The dumb step made only cosmetic edits
 \label{fig:strings}
 \end{figure}
 
+\subsection{Mixed Config (70\% Smart + 30\% Dumb) — Prime Number Generation}
+
+This is the actual thesis proposal: a predominantly smart search with random
+mutations injected for diversity.
+
+\begin{center}
+\begin{tabular}{lccccl}
+\toprule
+\textbf{Config} & \textbf{Score} & \textbf{Evals} & \textbf{Time} & \textbf{Target?} & \textbf{Notes} \\
+\midrule
+Dumb-only  (0\% smart)  & 75.3  & 77 & 0.2s  & \texttimes & Never solves it \\
+Mixed (70\% smart)      & \textbf{100.0} & 19 & 90s  & \checkmark (gen 9) & Sieve via bytearray \\
+Smart-only (100\% smart)& \textbf{100.0} & \textbf{9}  & 44s & \checkmark (gen 4) & Fastest \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Generation trace for mixed config}:
+\begin{itemize}
+  \item Gen 1--2 (smart): $74.7 \to 81.0 \to 89.1$ — LLM immediately moves
+    towards a sieve structure
+  \item Gen 5, 7 (dumb): score held at 89.1 — random mutations make no progress
+  \item Gen 9 (smart): $89.1 \to 100.0$ — LLM proposes \texttt{bytearray}
+    Sieve of Eratosthenes
+\end{itemize}
+
+\textbf{Key finding}: Both smart-only and mixed achieve 100/100 (the dumb step
+never does). Smart-only is slightly faster (9 vs 19 evals) because the 30\%
+dumb steps waste evaluations on random mutations that cannot reason towards the
+sieve. However, mixed is still $4\times$ more efficient than dumb-only —
+and will likely outperform smart-only on tasks where the LLM gets stuck in a
+local optimum, since the dumb steps can provide a diversity kick.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.88\textwidth]{figures/fig6_primes_threeway.png}
+\caption{Three-way comparison on prime number generation.
+  Smart-only is fastest (9 evals); mixed is close (19 evals) and also
+  reaches 100/100; dumb-only plateaus at 75.3 and never reaches the target.
+  The dumb steps in the mixed config provide no benefit here (the bottleneck
+  is semantic insight, not diversity), but add only modest overhead.}
+\label{fig:threeway}
+\end{figure}
+
 \subsection{Remaining Planned Experiments}
 
 \begin{enumerate}
-  \item \textbf{Mixed config} (70\% smart + 30\% dumb) — the actual thesis
-    proposal. Tests whether diversity from random mutation helps a predominantly
-    smart search.
-  \item \textbf{3 smart seeds per benchmark} — statistical significance for
-    the smart step, mirroring the dumb multi-seed above.
+  \item \textbf{Mixed config on strings} — does the dumb diversity kick
+    help or hinder on substring search?
+  \item \textbf{3 smart seeds per benchmark} — statistical significance
+    for the smart step, mirroring the dumb multi-seed results.
 \end{enumerate}
 
 \subsection{Hyperparameter Sweep (Dumb-Only, 36 Configs)}
@@ -715,22 +758,31 @@ escaping the initial basin by reasoning about \emph{why} the seed is slow.
 \subsection{Q3 — Smart/Dumb Balance: What Is the Optimal Ratio?}
 \label{sec:q3}
 
-\textbf{Status: Pending mixed-config experiments. Preliminary analysis below.}
+\textbf{Answer (partial): On tasks requiring a single structural insight,
+pure smart-only is most efficient. Mixed config adds modest overhead but
+still dramatically outperforms dumb-only.}
 
-The diversity data from the sorting benchmark is informative:
-\begin{itemize}
-  \item Dumb-only: diversity collapses to $\approx 0$ by generation 15.
-    All individuals converge to the same quicksort variant inserted by the
-    structural mutation.
-  \item Smart-only: diversity stays at $\approx 0.4$ throughout all 50 generations.
-    The LLM keeps proposing structurally different algorithms (Shell sort,
-    merge sort, hybrid approaches), maintaining population variety.
-\end{itemize}
+Results on the primes benchmark (seed 42):
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Config} & \textbf{Evals to target} & \textbf{Reached 95?} \\
+\midrule
+Dumb-only (0\% smart)   & 77 (no target) & \texttimes \\
+Mixed (70\% smart)      & 19             & \checkmark \\
+Smart-only (100\% smart)& \textbf{9}     & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-This motivates the \textbf{mixed config}: if the population has converged
-(smart-only collapses too), injecting random dumb mutations can re-introduce
-diversity. The planned 70\% smart + 30\% dumb ratio is designed to maintain
-the LLM's semantic reasoning while using random mutation as a diversity engine.
+On primes, pure smart-only wins — the bottleneck is semantic insight
+(``use a sieve''), not diversity. The 30\% dumb steps in the mixed config
+simply waste evaluations since random mutations cannot reason towards the sieve.
+
+However, the optimal ratio is likely \textbf{task-dependent}:
+on tasks where the LLM gets stuck in a local optimum (plateau without
+clear failure signal), the dumb steps' diversity kick may be more valuable.
+This motivates running the mixed config on strings and with multiple seeds.
 
 \subsection{Q4 — LLM Convergence: Does the Population Become Homogeneous?}
 \label{sec:q4}

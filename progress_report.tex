@@ -445,7 +445,7 @@ Matrix  & \checkmark & \checkmark & \checkmark & \checkmark \\
 \midrule
 Sorting  & 72.8 & 71.9 & $\sim$99 & 101 & $\approx$Tie (ceiling) \\
 Primes   & 75.3 & \textbf{100.0} & $\sim$76 & \textbf{9}  & \textbf{Smart ($8.5\times$)} \\
-Strings  & 73.6 & TBD & $\sim$83 & — & Smart pending \\
+Strings  & 73.6 & \textbf{97.4} & $\sim$83 & \textbf{51} & \textbf{Smart ($1.6\times$)} \\
 Matrix   & 97.4 & TBD & $\sim$3  & — & Trivial (skip) \\
 \bottomrule
 \end{tabular}
@@ -506,11 +506,57 @@ Matrix   & 97.4 & TBD & $\sim$3  & — & Trivial (skip) \\
 
 \clearpage
 
+\subsection{Smart-Only vs Dumb-Only — String Search}
+
+\begin{center}
+\begin{tabular}{lccccl}
+\toprule
+\textbf{Config} & \textbf{Score} & \textbf{Evals} & \textbf{Time} & \textbf{Target?} & \textbf{Best algorithm} \\
+\midrule
+Dumb-only  & 74.3 & 81 & 0.1s & \texttimes & Brute-force with cosmetic edits \\
+Smart-only & \textbf{97.4} & \textbf{51} & 375s & \checkmark (gen 25) & \texttt{str.find()} loop (C-backed) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The LLM-generated solution:
+\begin{lstlisting}
+def find_pattern(text: str, pattern: str) -> list:
+    """Optimized: use built-in str.find in a loop for efficient search."""
+    results = []
+    n, m = len(text), len(pattern)
+    if m == 0:
+        return []
+    start = 0
+    while True:
+        idx = text.find(pattern, start)
+        if idx == -1:
+            break
+        results.append(idx)
+        start = idx + 1
+    return results
+\end{lstlisting}
+
+\textbf{Interpretation}: The LLM read the failure evidence
+(``speed: 0.09$\times$ baseline, correct but slow'') and reasoned that
+Python's built-in \texttt{str.find()} is implemented in C and should
+be used instead of a pure-Python character-by-character loop.
+This is exactly the kind of \emph{semantic reasoning} the thesis proposes:
+the smart step identified \emph{why} the code was slow and chose the
+appropriate tool. The dumb step made only cosmetic edits
+(variable renames, off-by-one tweaks) and never escaped the O(nm) basin.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/fig5_score_vs_evals_strings.png}
+\caption{Smart vs dumb step on string search. The smart step reaches
+  97.4/100 in 51 evaluations; the dumb step is stuck at 74.3 after 81.}
+\label{fig:strings}
+\end{figure}
+
 \subsection{Remaining Planned Experiments}
 
 \begin{enumerate}
-  \item \textbf{Strings smart-only} — does the LLM propose KMP or Boyer-Moore
-    from the ``speed: 0.10$\times$ baseline'' signal?
   \item \textbf{Mixed config} (70\% smart + 30\% dumb) — the actual thesis
     proposal. Tests whether diversity from random mutation helps a predominantly
     smart search.

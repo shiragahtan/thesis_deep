@@ -33,6 +33,7 @@ RESULT_MAP = {
     ("sorting",  "dumb",  42): "results/run_1788845672.json",
     # Strings
     ("strings",  "dumb",  42): "results/run_1788848480.json",
+    ("strings",  "smart", 42): "results/run_1788980054.json",
     # Matrix
     ("matrix",   "dumb",  42): "results/run_1788962853.json",
 }
@@ -161,7 +162,7 @@ def fig3_comparison():
     data = [
         ("Sorting",  71.9, 72.8),
         ("Primes",  100.0, 75.3),
-        ("Strings",  None, 73.6),   # smart pending
+        ("Strings",  97.4, 73.6),
     ]
 
     fig, ax = plt.subplots(figsize=(9, 5))
@@ -174,10 +175,6 @@ def fig3_comparison():
 
     b1 = ax.bar(x - w/2, dumb_scores,  w, label="Dumb-only (avg 4 seeds)", color=COLORS["dumb"],  alpha=0.8)
     b2 = ax.bar(x + w/2, smart_scores, w, label="Smart-only (seed 42)",     color=COLORS["smart"], alpha=0.8)
-
-    # Hatch the pending bar
-    ax.bar(x[2] + w/2, 73.6, w, color="white", edgecolor=COLORS["smart"],
-           hatch='////', linewidth=1.5, label="Smart pending (est.)")
 
     ax.axhline(95, color="gray", linestyle="--", linewidth=1.5, label="Target (95)")
 
@@ -244,6 +241,47 @@ def fig4_sorting():
     plt.close()
     print("✓ figures/fig4_sorting_diversity.png")
 
+# ── Figure 5: Smart vs Dumb on Strings ────────────────────────────────────────
+
+def fig5_strings():
+    smart = load(("strings", "smart", 42))
+    dumb  = load(("strings", "dumb",  42))
+    if not smart or not dumb:
+        print("fig5: missing data, skipping"); return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    se, ss = score_curve(smart)
+    de, ds = score_curve(dumb)
+
+    ax.plot(se, ss, color=COLORS["smart"], linewidth=2.5, marker='o', markersize=4,
+            label=f"Smart-only  →  {smart['best_score']:.1f}/100 in {smart['total_evaluations']} evals")
+    ax.plot(de, ds, color=COLORS["dumb"],  linewidth=2.5, marker='s', markersize=4,
+            label=f"Dumb-only   →  {dumb['best_score']:.1f}/100 in {dumb['total_evaluations']} evals")
+
+    ax.axhline(95, color="gray", linestyle="--", linewidth=1.2, label="Target (95)")
+
+    ax.annotate("97.4/100\n(51 evals)", xy=(smart['total_evaluations'], smart['best_score']),
+                xytext=(-40, -18), textcoords='offset points',
+                arrowprops=dict(arrowstyle='->', color=COLORS["smart"]),
+                color=COLORS["smart"], fontsize=10, fontweight='bold')
+    ax.annotate("Stuck at 74.3\n(81 evals)", xy=(dumb['total_evaluations'], dumb['best_score']),
+                xytext=(5, 8), textcoords='offset points',
+                color=COLORS["dumb"], fontsize=9)
+
+    ax.set_xlabel("Evaluations", fontsize=12)
+    ax.set_ylabel("Best score / 100", fontsize=12)
+    ax.set_title("String Search: Smart vs Dumb Step\n"
+                 "LLM discovers str.find() loop — 1.6× more sample-efficient", fontsize=13)
+    ax.legend(fontsize=10)
+    ax.set_ylim(60, 105)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("figures/fig5_score_vs_evals_strings.png", dpi=150)
+    plt.close()
+    print("✓ figures/fig5_score_vs_evals_strings.png")
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -252,4 +290,5 @@ if __name__ == "__main__":
     fig2_dumb_multiseed()
     fig3_comparison()
     fig4_sorting()
+    fig5_strings()
     print("\nAll figures saved to figures/")

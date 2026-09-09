@@ -465,7 +465,48 @@ Matrix   & 97.4 & TBD & $\sim$3  & — & Trivial (skip) \\
     the required insight.
 \end{itemize}
 
-\subsection{Next Experiments (Planned)}
+\subsection{Figures}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{figures/fig1_score_vs_evals_primes.png}
+\caption{Smart vs dumb step on the prime number generation benchmark.
+  The smart step reaches 100/100 in 9 evaluations; the dumb step plateaus
+  at 75.3 after 77 evaluations — an $8.5\times$ improvement in sample efficiency.}
+\label{fig:primes}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{figures/fig2_dumb_multiseed.png}
+\caption{Dumb-only baseline across 4 random seeds on three benchmarks.
+  Score variance is $<$2 points in all cases, confirming the ceiling near
+  72--75 is a property of the \emph{strategy}, not random luck.}
+\label{fig:multiseed}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.80\textwidth]{figures/fig3_benchmark_comparison.png}
+\caption{Final scores by benchmark. The primes result is the clearest
+  demonstration of the thesis contribution. Strings smart result is pending.}
+\label{fig:comparison}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.80\textwidth]{figures/fig4_sorting_diversity.png}
+\caption{Sorting benchmark: both strategies plateau (ceiling effect), but
+  the smart step maintains population diversity (score std-dev $\approx 0.4$)
+  throughout all 50 generations, while the dumb step collapses to zero by
+  generation 15. This suggests the smart step could escape a local optimum
+  given a better benchmark.}
+\label{fig:sorting}
+\end{figure}
+
+\clearpage
+
+\subsection{Remaining Planned Experiments}
 
 \begin{enumerate}
   \item \textbf{Strings smart-only} — does the LLM propose KMP or Boyer-Moore
@@ -476,11 +517,6 @@ Matrix   & 97.4 & TBD & $\sim$3  & — & Trivial (skip) \\
   \item \textbf{3 smart seeds per benchmark} — statistical significance for
     the smart step, mirroring the dumb multi-seed above.
 \end{enumerate}
-
-\textbf{Interpretation}: This is exactly the motivation for the smart step.
-The LLM, given the failure evidence (``speed: 0.02$\times$ baseline, correct
-but $O(n^2)$''), should be able to propose a fundamentally different algorithm
---- something a random line swap cannot do.
 
 \subsection{Hyperparameter Sweep (Dumb-Only, 36 Configs)}
 
@@ -578,34 +614,33 @@ r = evaluate(bad, timeout=2)
 
 \section{Next Steps}
 
-\subsection{Immediate (requires API key)}
+\subsection{Remaining Experiments (require Groq API)}
 \begin{enumerate}
-  \item Set \texttt{ANTHROPIC\_API\_KEY} and run \texttt{python compare.py}:
-    compare smart-only vs dumb-only vs mixed across 3+ seeds.
-  \item Analyse the smart step trajectories: does the LLM propose merge sort /
-    quicksort on the first few calls?
-  \item Run the evaluator ablation: does \texttt{correctness} or \texttt{speed}
-    as the sole signal change what the LLM proposes?
+  \item \textbf{Strings smart-only}: run \texttt{python3 main.py --smart-only
+    --benchmark strings}. Expected to show LLM proposing KMP/Boyer-Moore.
+  \item \textbf{Mixed config} (70\% smart + 30\% dumb) on primes:
+    \texttt{python3 main.py --smart-ratio 0.7 --benchmark primes}.
+    This is the actual thesis proposal — not just the extremes.
+  \item \textbf{3 smart seeds per benchmark}: mirror the dumb multi-seed table
+    (Section~\ref{sec:results}) for the smart step to report mean $\pm$ std.
 \end{enumerate}
 
-\subsection{Short Term}
+\subsection{Analysis and Writing}
 \begin{enumerate}
-  \item Complete the hyperparameter sweep (\texttt{param\_sweep.py}) and
-    identify the best population/proposer configuration.
-  \item Port the framework to the matrix multiplication benchmark and run
-    the same smart vs dumb comparison.
-  \item Add AutoResearch~\cite{autoresearch} as a third comparison baseline.
+  \item Write Research Question analysis section: answer each RQ with the
+    data collected so far.
+  \item Diversity collapse study: measure token-level similarity (not just
+    score std-dev) to show population homogeneity.
+  \item Ablation of $E(x_t)$ components: does removing the stack trace or
+    score from the LLM context degrade sample efficiency?
 \end{enumerate}
 
 \subsection{Long Term}
 \begin{enumerate}
-  \item Scale to 3+ seeds per configuration and report mean $\pm$ std.
-  \item Study diversity collapse: measure code-level similarity (token overlap,
-    AST edit distance) not just score std-dev.
-  \item Investigate island model: run $k$ independent populations and
-    periodically migrate the best programs between them.
-  \item Ablate $E(x_t)$ components (Q5): does removing the stack trace or
-    the score from the context change the LLM's proposals?
+  \item Island model: $k$ independent populations with periodic migration.
+  \item Scale to real competitive-programming benchmarks (LeetCode Hard).
+  \item Formal proof: under what conditions does failure-informed mutation
+    converge faster than blind mutation in expectation?
 \end{enumerate}
 
 % ─────────────────────────────────────────────────────────────────────────────

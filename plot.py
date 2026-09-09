@@ -1,145 +1,255 @@
 """
 plot.py
 -------
-Visualise results from one or more runs saved in results/.
+Generate all thesis plots from saved result JSON files.
 
 Usage:
-    python plot.py                          # plot all runs in results/
-    python plot.py results/run_A.json results/run_B.json
+    python3 plot.py
 
-Produces:
-  1. Sample efficiency curve  (score vs evaluator calls)
-  2. Smart vs dumb step breakdown per run
-  3. Diversity over generations
+Outputs (saved to figures/):
+  - fig1_score_vs_evals_primes.png   — smart vs dumb on primes (the headline result)
+  - fig2_dumb_multiseed.png          — dumb-only consistency across 4 seeds x 3 benchmarks
+  - fig3_benchmark_comparison.png    — final scores bar chart across all benchmarks
 """
 
 import json
-import sys
 import os
-import glob
 import matplotlib
-import matplotlib.font_manager as fm
+matplotlib.use('Agg')   # no display needed
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import numpy as np
 
-# ── match presentation font if available ──────────────────────────────────────
-for f in glob.glob(os.path.expanduser("~/Library/Fonts/Aptos*.ttf")):
-    fm.fontManager.addfont(f)
-matplotlib.rcParams['font.family'] = 'Aptos'
+# ── Known result files (keyed by (benchmark, mode, seed)) ─────────────────────
+# Map from (benchmark, mode, seed) → result file path
+# Add new files here as experiments complete.
 
-BG    = "#1A3A2A"; GOLD  = "#D4A843"; CREAM = "#F2EBD9"
-GRN2  = "#162E1E"; MUTED = "#789678"; TEAL  = "#4ACFB0"
-AMBER = "#E8953A"; RED   = "#C05050"; WARM_W= "#FFF8EE"
+RESULT_MAP = {
+    # Primes
+    ("primes",   "smart", 42): "results/run_1788848147.json",
+    ("primes",   "dumb",  42): "results/run_1788848097.json",
+    # Sorting
+    ("sorting",  "smart", 42): "results/run_1788848030.json",
+    ("sorting",  "dumb",  42): "results/run_1788845672.json",
+    # Strings
+    ("strings",  "dumb",  42): "results/run_1788848480.json",
+    # Matrix
+    ("matrix",   "dumb",  42): "results/run_1788962853.json",
+}
 
-RUN_COLORS = [GOLD, TEAL, AMBER, RED, "#9B7FD4", "#60B8E0"]
+# Dumb multi-seed results (scores only — from terminal output, no JSON per-seed yet)
+DUMB_MULTISEED = {
+    "sorting": {"seeds": [42, 1, 7, 99], "scores": [74.2, 72.2, 73.0, 71.8], "evals": [100, 99, 97, 98]},
+    "primes":  {"seeds": [42, 1, 7, 99], "scores": [75.3, 75.0, 75.5, 75.3], "evals": [77, 77, 76, 74]},
+    "strings": {"seeds": [42, 1, 7, 99], "scores": [74.3, 73.7, 73.4, 72.8], "evals": [81, 84, 88, 79]},
+}
 
+COLORS = {
+    "smart": "#2E86AB",   # blue
+    "dumb":  "#E84855",   # red
+}
 
-def load_runs(paths: list) -> list:
-    runs = []
-    for p in paths:
-        with open(p) as f:
-            runs.append((os.path.basename(p), json.load(f)))
-    return runs
+os.makedirs("figures", exist_ok=True)
 
+# ── Helper ─────────────────────────────────────────────────────────────────────
 
-def plot_all(paths: list, save_path: str = "results/summary_plot.png"):
-    runs = load_runs(paths)
-    if not runs:
-        print("No run files found.")
-        return
+def load(key):
+    path = RESULT_MAP.get(key)
+    if path and os.path.exists(path):
+        return json.load(open(path))
+    return None
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5), facecolor=BG)
-    fig.subplots_adjust(wspace=0.35)
+def score_curve(result):
+    """Return (cumulative_evals, best_score) arrays from a result dict."""
+    gens = result.get("generations", [])
+    evals, scores = [0], [result["generations"][0]["best_score"] if gens else 70]
+    cumulative = 0
+    for g in gens:
+        cumulative += g.get("proposers_tried", 2)
+        evals.append(cumulative)
+        scores.append(g["best_score"])
+    return np.array(evals), np.array(scores)
 
-    for ax in axes:
-        ax.set_facecolor(GRN2)
-        for sp in ax.spines.values():
-            sp.set_color(MUTED); sp.set_linewidth(0.8)
-        ax.tick_params(colors=CREAM, labelsize=9)
+# ── Figure 1: Smart vs Dumb on Primes (headline result) ───────────────────────
 
-    # ── 1. Sample efficiency: score vs evaluator calls ────────────────────────
-    ax = axes[0]
-    ax.set_title("Sample Efficiency", color=WARM_W, fontsize=13, fontweight='bold', pad=8)
-    ax.set_xlabel("Evaluator calls", color=CREAM, fontsize=10)
-    ax.set_ylabel("Best score",      color=CREAM, fontsize=10)
-    ax.grid(True, color=MUTED, alpha=0.15)
+def fig1_primes():
+    smart = load(("primes", "smart", 42))
+    dumb  = load(("primes", "dumb",  42))
+    if not smart or not dumb:
+        print("fig1: missing data, skipping"); return
 
-    for (name, run), col in zip(runs, RUN_COLORS):
-        gens  = run["generations"]
-        # evaluator calls accumulate: 1 seed + NUM_PROPOSERS per gen (approx)
-        # we reconstruct from proposers_tried
-        evals = [1]
-        for g in gens:
-            evals.append(evals[-1] + g["proposers_tried"])
-        scores = [gens[0]["best_score"]] + [g["best_score"] for g in gens]
-        label  = name.replace("run_", "").replace(".json", "")
-        ax.plot(evals, scores, color=col, lw=2.2, label=label)
-        ax.scatter(evals[-1], scores[-1], color=col, s=50, zorder=5)
+    fig, ax = plt.subplots(figsize=(8, 5))
 
-    if run.get("config", {}).get("TARGET_SCORE"):
-        ax.axhline(run["config"]["TARGET_SCORE"], color=RED,
-                   lw=1.4, linestyle='-.', alpha=0.7)
-        ax.text(ax.get_xlim()[1] * 0.02, run["config"]["TARGET_SCORE"] + 1,
-                "target", color=RED, fontsize=8)
+    se, ss = score_curve(smart)
+    de, ds = score_curve(dumb)
 
-    ax.legend(facecolor=GRN2, edgecolor=MUTED, labelcolor=CREAM, fontsize=9)
+    ax.plot(se, ss, color=COLORS["smart"], linewidth=2.5, marker='o', markersize=4,
+            label=f"Smart-only (LLM-guided)  →  {smart['best_score']:.0f}/100 in {smart['total_evaluations']} evals")
+    ax.plot(de, ds, color=COLORS["dumb"],  linewidth=2.5, marker='s', markersize=4,
+            label=f"Dumb-only (random)        →  {dumb['best_score']:.1f}/100 in {dumb['total_evaluations']} evals")
 
-    # ── 2. Smart vs dumb step distribution ───────────────────────────────────
-    ax = axes[1]
-    ax.set_title("Smart vs Dumb Steps", color=WARM_W, fontsize=13, fontweight='bold', pad=8)
-    ax.set_ylabel("Count", color=CREAM, fontsize=10)
-    ax.grid(True, color=MUTED, alpha=0.15, axis='y')
+    ax.axhline(95, color="gray", linestyle="--", linewidth=1.2, label="Target score (95)")
+    ax.axhline(75.3, color=COLORS["dumb"], linestyle=":", linewidth=1, alpha=0.6)
 
-    labels, smart_counts, dumb_counts = [], [], []
-    for (name, run), col in zip(runs, RUN_COLORS):
-        gens = run["generations"]
-        smart = sum(1 for g in gens if g["step_type"] == "smart")
-        dumb  = len(gens) - smart
-        label = name.replace("run_", "").replace(".json", "")
-        labels.append(label)
-        smart_counts.append(smart)
-        dumb_counts.append(dumb)
+    # Annotate the 8.5× callout
+    ax.annotate("100/100\n(9 evals)", xy=(smart['total_evaluations'], smart['best_score']),
+                xytext=(20, -15), textcoords='offset points',
+                arrowprops=dict(arrowstyle='->', color=COLORS["smart"]),
+                color=COLORS["smart"], fontsize=10, fontweight='bold')
+    ax.annotate("Stuck at 75.3\n(77 evals)", xy=(dumb['total_evaluations'], dumb['best_score']),
+                xytext=(10, 10), textcoords='offset points',
+                color=COLORS["dumb"], fontsize=9)
 
-    x = range(len(labels))
+    ax.set_xlabel("Evaluations (program executions)", fontsize=12)
+    ax.set_ylabel("Best score / 100", fontsize=12)
+    ax.set_title("Prime Number Generation: Smart vs Dumb Step\n"
+                 r"$\bf{8.5\times}$ improvement in sample efficiency", fontsize=13)
+    ax.legend(fontsize=10, loc="lower right")
+    ax.set_ylim(60, 105)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("figures/fig1_score_vs_evals_primes.png", dpi=150)
+    plt.close()
+    print("✓ figures/fig1_score_vs_evals_primes.png")
+
+# ── Figure 2: Dumb-only multi-seed consistency ─────────────────────────────────
+
+def fig2_dumb_multiseed():
+    fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=True)
+    benchmarks = ["sorting", "primes", "strings"]
+    titles = ["Sorting", "Prime Generation", "String Search"]
+
+    for ax, bm, title in zip(axes, benchmarks, titles):
+        data = DUMB_MULTISEED[bm]
+        seeds = data["seeds"]
+        scores = data["scores"]
+        evals  = data["evals"]
+        mean_s = np.mean(scores)
+        std_s  = np.std(scores)
+
+        bars = ax.bar([str(s) for s in seeds], scores,
+                      color=COLORS["dumb"], alpha=0.75, edgecolor='black', linewidth=0.8)
+        ax.axhline(95, color="gray", linestyle="--", linewidth=1.2, label="Target (95)")
+        ax.axhline(mean_s, color="darkred", linestyle="-", linewidth=1.5,
+                   label=f"Mean={mean_s:.1f}")
+
+        ax.set_title(f"{title}\nmean={mean_s:.1f} ± {std_s:.1f}", fontsize=11)
+        ax.set_xlabel("Random seed", fontsize=10)
+        if ax == axes[0]:
+            ax.set_ylabel("Best score / 100", fontsize=11)
+        ax.set_ylim(60, 102)
+        ax.legend(fontsize=8)
+
+        # Label bars with eval counts
+        for bar, ev in zip(bars, evals):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                    f"{ev}ev", ha='center', va='bottom', fontsize=8, color='#333')
+
+    fig.suptitle("Dumb-Only Baseline: Consistent Ceiling Across 4 Seeds\n"
+                 "(target=95 never reached — strategy limited, not seed-dependent)",
+                 fontsize=12, y=1.02)
+    plt.tight_layout()
+    plt.savefig("figures/fig2_dumb_multiseed.png", dpi=150, bbox_inches='tight')
+    plt.close()
+    print("✓ figures/fig2_dumb_multiseed.png")
+
+# ── Figure 3: Final score comparison bar chart ─────────────────────────────────
+
+def fig3_comparison():
+    # Known results: (benchmark, smart_score, dumb_avg_score)
+    data = [
+        ("Sorting",  71.9, 72.8),
+        ("Primes",  100.0, 75.3),
+        ("Strings",  None, 73.6),   # smart pending
+    ]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = np.arange(len(data))
     w = 0.35
-    bars1 = ax.bar([i - w/2 for i in x], smart_counts, w, color=GOLD,  alpha=0.85, label="smart")
-    bars2 = ax.bar([i + w/2 for i in x], dumb_counts,  w, color=MUTED, alpha=0.85, label="dumb")
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(labels, rotation=20, ha='right', color=CREAM, fontsize=8)
-    ax.legend(facecolor=GRN2, edgecolor=MUTED, labelcolor=CREAM, fontsize=9)
 
-    # ── 3. Diversity over generations ─────────────────────────────────────────
-    ax = axes[2]
-    ax.set_title("Population Diversity", color=WARM_W, fontsize=13, fontweight='bold', pad=8)
-    ax.set_xlabel("Generation",     color=CREAM, fontsize=10)
-    ax.set_ylabel("Score std-dev",  color=CREAM, fontsize=10)
-    ax.grid(True, color=MUTED, alpha=0.15)
+    dumb_scores  = [d[2] for d in data]
+    smart_scores = [d[1] if d[1] is not None else 0 for d in data]
+    labels       = [d[0] for d in data]
 
-    for (name, run), col in zip(runs, RUN_COLORS):
-        gens  = run["generations"]
-        gen_x = [g["generation"] for g in gens]
-        divs  = [g["diversity"]  for g in gens]
-        label = name.replace("run_", "").replace(".json", "")
-        ax.plot(gen_x, divs, color=col, lw=2.0, label=label)
+    b1 = ax.bar(x - w/2, dumb_scores,  w, label="Dumb-only (avg 4 seeds)", color=COLORS["dumb"],  alpha=0.8)
+    b2 = ax.bar(x + w/2, smart_scores, w, label="Smart-only (seed 42)",     color=COLORS["smart"], alpha=0.8)
 
-    ax.legend(facecolor=GRN2, edgecolor=MUTED, labelcolor=CREAM, fontsize=9)
+    # Hatch the pending bar
+    ax.bar(x[2] + w/2, 73.6, w, color="white", edgecolor=COLORS["smart"],
+           hatch='////', linewidth=1.5, label="Smart pending (est.)")
 
-    fig.suptitle("LLM-Guided Evolutionary Search — Results",
-                 color=WARM_W, fontsize=15, fontweight='bold', y=1.02)
+    ax.axhline(95, color="gray", linestyle="--", linewidth=1.5, label="Target (95)")
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    fig.savefig(save_path, dpi=180, bbox_inches='tight', facecolor=BG)
-    plt.close(fig)
-    print(f"Plot saved → {save_path}")
+    # Annotate the key result
+    ax.annotate("8.5× fewer\nevaluations!", xy=(1 + w/2, 100),
+                xytext=(1 + w/2 + 0.3, 93),
+                arrowprops=dict(arrowstyle='->', color=COLORS["smart"]),
+                color=COLORS["smart"], fontsize=10, fontweight='bold')
 
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=12)
+    ax.set_ylabel("Best score / 100", fontsize=12)
+    ax.set_title("Smart vs Dumb Step — Final Scores by Benchmark", fontsize=13)
+    ax.set_ylim(60, 108)
+    ax.legend(fontsize=10)
+    ax.grid(True, axis='y', alpha=0.3)
+
+    # Value labels on bars
+    for bar in list(b1) + list(b2):
+        h = bar.get_height()
+        if h > 0:
+            ax.text(bar.get_x() + bar.get_width()/2, h + 0.5, f"{h:.1f}",
+                    ha='center', va='bottom', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig("figures/fig3_benchmark_comparison.png", dpi=150)
+    plt.close()
+    print("✓ figures/fig3_benchmark_comparison.png")
+
+# ── Figure 4: Score trajectory on sorting (shows diversity effect) ─────────────
+
+def fig4_sorting():
+    smart = load(("sorting", "smart", 42))
+    dumb  = load(("sorting", "dumb",  42))
+    if not smart or not dumb:
+        print("fig4: missing data, skipping"); return
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 7), sharex=False)
+
+    # Score curves
+    se, ss = score_curve(smart)
+    de, ds = score_curve(dumb)
+    ax1.plot(se, ss, color=COLORS["smart"], linewidth=2, label=f"Smart → {smart['best_score']:.1f}/100")
+    ax1.plot(de, ds, color=COLORS["dumb"],  linewidth=2, label=f"Dumb  → {dumb['best_score']:.1f}/100")
+    ax1.axhline(95, color="gray", linestyle="--", linewidth=1, label="Target (95)")
+    ax1.set_ylabel("Best score / 100")
+    ax1.set_title("Sorting Benchmark: Smart vs Dumb\n(ceiling effect — C Timsort baseline)")
+    ax1.legend(); ax1.grid(True, alpha=0.3); ax1.set_ylim(60, 100)
+
+    # Diversity comparison
+    s_div = [g["diversity"] for g in smart.get("generations", [])]
+    d_div = [g["diversity"] for g in dumb.get("generations", [])]
+    ax2.plot(range(1, len(s_div)+1), s_div, color=COLORS["smart"], linewidth=2,
+             label="Smart diversity (std-dev of scores)")
+    ax2.plot(range(1, len(d_div)+1), d_div, color=COLORS["dumb"],  linewidth=2,
+             label="Dumb diversity")
+    ax2.set_xlabel("Generation")
+    ax2.set_ylabel("Population diversity\n(score std-dev)")
+    ax2.set_title("Diversity: Smart step avoids collapse, Dumb collapses to ~0")
+    ax2.legend(); ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig("figures/fig4_sorting_diversity.png", dpi=150)
+    plt.close()
+    print("✓ figures/fig4_sorting_diversity.png")
+
+# ── Main ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        paths = sys.argv[1:]
-    else:
-        paths = sorted(glob.glob("results/run_*.json"))
-
-    if not paths:
-        print("No result files found. Run main.py first.")
-    else:
-        print(f"Plotting {len(paths)} run(s): {paths}")
-        plot_all(paths)
+    print("Generating thesis figures...")
+    fig1_primes()
+    fig2_dumb_multiseed()
+    fig3_comparison()
+    fig4_sorting()
+    print("\nAll figures saved to figures/")

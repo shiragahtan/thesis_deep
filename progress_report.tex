@@ -669,10 +669,51 @@ strings. The optimal strategy is \emph{task-dependent}: on tasks where a single
 semantic leap is sufficient (primes), pure smart is fastest; on tasks where
 fine-grained tweaks matter after the main insight (strings), mixed config wins.
 
-\subsection{Remaining Planned Experiments}
-\begin{enumerate}
-  \item \textbf{3 smart seeds per benchmark} — statistical significance.
-\end{enumerate}
+\subsection{Multi-Seed Smart Results}
+
+\subsubsection{Primes — Smart-Only, 4 Seeds}
+
+All 4 seeds reached the target score of 95. Results are highly consistent:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Seed} & \textbf{Score} & \textbf{Evals to target} & \textbf{Reached?} \\
+\midrule
+42  & 100.0 & 9  & \checkmark \\
+1   & 100.0 & 13 & \checkmark \\
+7   & 95.08 & 7  & \checkmark \\
+99  & 99.24 & 9  & \checkmark \\
+\midrule
+\textbf{Mean $\pm$ std} & $\mathbf{98.6 \pm 2.3}$ & $\mathbf{9.5 \pm 2.4}$ & \textbf{4/4} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Contrast with dumb-only} (4 seeds): mean $75.3 \pm 0.2$, 0/4 reached target.
+The gap is unambiguous: $98.6$ vs $75.3$ in score, 0\% vs 100\% target rate.
+
+\subsubsection{Strings — Smart-Only, Seeds 42 and 1}
+
+Seeds 7 and 99 suffered from Groq API connection outages during the run
+(repeated ``Connection error'' failures exhausted all retries), making those
+results invalid. The two clean runs:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Seed} & \textbf{Score} & \textbf{Evals to target} & \textbf{Reached?} \\
+\midrule
+42  & 97.4  & 51 & \checkmark \\
+1   & 95.78 & 27 & \checkmark \\
+\midrule
+\textbf{Mean} & $\mathbf{96.6}$ & $\mathbf{39}$ & \textbf{2/2} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both clean runs reached the target. The dumb-only mean for strings was
+$73.6$, 0/4 reached target. The smart step advantage is consistent.
 
 \subsection{Hyperparameter Sweep (Dumb-Only, 36 Configs)}
 

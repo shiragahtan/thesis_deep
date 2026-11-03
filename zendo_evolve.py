@@ -224,6 +224,32 @@ def dumb_mutate(rule: Rule, rng: random.Random) -> Rule:
 
 # ── LLM prompts ──────────────────────────────────────────────────────────────
 
+def smart_prompt_simple(current_rule: Rule, score_info: dict,
+                        target_n_clauses: int = 1) -> str:
+    """Simple prompt for exploration phase — show worlds, ask for improvement."""
+    fp = score_info["false_positives"][:3]
+    fn = score_info["false_negatives"][:3]
+    fp_text = "\n".join(world_to_nl(w) for w in fp) if fp else "  (none)"
+    fn_text = "\n".join(world_to_nl(w) for w in fn) if fn else "  (none)"
+    return f"""You are finding a hidden rule for the Zendo game (exactly {target_n_clauses} clause(s)).
+A world is POSITIVE (rule holds) or NEGATIVE (rule does not hold).
+
+Current rule:
+{rule_to_str(current_rule)}
+
+Accuracy: {score_info['score_pct']}%  (fp={score_info['fp']} fn={score_info['fn']})
+
+False positives (rule accepted these but they are NEGATIVE):
+{fp_text}
+
+False negatives (rule rejected these but they are POSITIVE):
+{fn_text}
+
+Propose a BETTER rule that fixes these errors.
+
+{RULE_FORMAT_HINT}"""
+
+
 def smart_prompt(current_rule: Rule, score_info: dict,
                  positives: list[World], negatives: list[World],
                  target_n_clauses: int = 1) -> str:
@@ -248,14 +274,25 @@ def smart_prompt(current_rule: Rule, score_info: dict,
     fp_text = "\n".join(fp_lines) if fp_lines else "  (none)"
     fn_text = "\n".join(fn_lines) if fn_lines else "  (none)"
 
-    # Clause-level diagnosis summary
+    # Clause-level diagnosis summary with contrast examples
     clause_diag = []
     all_guilty = {}
     for w, guilty in score_info["fp_attribution"]:
         for i in guilty:
             all_guilty[i] = all_guilty.get(i, 0) + 1
+
+    # For each guilty clause, find worlds it CORRECTLY accepts (true positives)
+    clause_tp_worlds = {}
+    for i in all_guilty:
+        tp_for_clause = [w for w in positives if _clause_accepts(clauses[i], w)]
+        clause_tp_worlds[i] = tp_for_clause[:3]
+
     for i, count in sorted(all_guilty.items()):
-        clause_diag.append(f"  Clause {i+1} causes {count} false positive(s) — needs more constraints")
+        clause_diag.append(f"\n  Clause {i+1} causes {count} false positive(s) — needs more constraints")
+        tp_examples = clause_tp_worlds.get(i, [])
+        if tp_examples:
+            tp_text = "; ".join(world_to_nl(w) for w in tp_examples)
+            clause_diag.append(f"  Clause {i+1} CORRECTLY accepts (positive worlds, keep these): {tp_text}")
     clause_summary = "\n".join(clause_diag) if clause_diag else "  (no per-clause diagnosis)"
 
     return f"""You are finding a hidden rule for the Zendo game.
@@ -266,19 +303,20 @@ Current rule ({n_clauses} clause(s), OR-connected):
 
 Accuracy: {score_info['score_pct']}%  |  false_positives={score_info['fp']}  false_negatives={score_info['fn']}
 
-CLAUSE DIAGNOSIS:
+CLAUSE DIAGNOSIS (compare TRUE POSITIVES vs FALSE POSITIVES to find what condition to add):
 {clause_summary}
 
-FALSE POSITIVES (your rule accepted these NEGATIVE worlds — rule is too broad):
+ALL FALSE POSITIVES (your rule accepted these NEGATIVE worlds):
 {fp_text}
 
 FALSE NEGATIVES (your rule rejected these POSITIVE worlds — rule is too strict):
 {fn_text}
 
 INSTRUCTIONS:
-- For each clause flagged as TOO BROAD: add more specific conditions to reject the false-positive worlds.
-- For each false negative: consider adding a NEW clause (OR branch) that accepts it.
-- Do NOT remove conditions that are helping with true positives.
+- Study the FALSE POSITIVES vs TRUE POSITIVES for each guilty clause.
+- Find a condition that the TRUE POSITIVES share but the FALSE POSITIVES lack.
+- Add that condition to tighten the clause.
+- Do NOT remove conditions that help with true positives.
 - The hidden rule has exactly {target_n_clauses} clause(s) total.
 
 {RULE_FORMAT_HINT}"""
@@ -358,8 +396,19 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             step = "smart"
         elif config == "openevolve":
             step = "openevolve"
-        else:  # mixed 70/30
-            step = "smart" if rng.random() < 0.7 else "dumb"
+        else:  # mixed — adaptive: reduce random rate as accuracy rises
+            # When score ≥80% with no false negatives, we only need to
+            # tighten existing clauses. Random mutations would destroy that
+            # structure. Switch to pure smart for refinement.
+            fn_now = score_info["fn"]
+            score_now = score_info["score_pct"]
+            if score_now >= 80.0 and fn_now == 0:
+                smart_prob = 1.0   # refinement phase: pure smart
+            elif score_now >= 65.0:
+                smart_prob = 0.85  # mostly smart once structure is emerging
+            else:
+                smart_prob = 0.7   # exploration phase: standard 70/30
+            step = "smart" if rng.random() < smart_prob else "dumb"
 
         # Propose next rule
         candidate = None
@@ -367,10 +416,36 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             candidate = dumb_mutate(current_rule, rng)
         elif step == "smart":
             try:
-                prompt = smart_prompt(current_rule, score_info, positives, negatives,
-                                      target_n_clauses=target_n_clauses)
-                llm_out = call_llm(prompt)
-                candidate = parse_rule_from_llm(llm_out)
+                # Refinement phase: score >= 80% with no FNs.
+                # Use per-clause attribution + contrast examples to tighten specific clauses.
+                # Also sample k=3 proposals and take the best (beam step).
+                # Exploration phase: simpler prompt, single proposal.
+                refinement_phase = (score_info["score_pct"] >= 80.0
+                                    and score_info["fn"] == 0)
+                if refinement_phase:
+                    prompt = smart_prompt(current_rule, score_info, positives, negatives,
+                                          target_n_clauses=target_n_clauses)
+                    # Best-of-3: take the highest-scoring LLM proposal
+                    proposals = []
+                    for _ in range(3):
+                        try:
+                            out = call_llm(prompt, temperature=0.6)
+                            p = parse_rule_from_llm(out)
+                            if p is not None:
+                                ps = score_rule(p, positives, negatives)
+                                proposals.append((ps["score_pct"], p))
+                        except Exception:
+                            pass
+                    if proposals:
+                        proposals.sort(key=lambda x: x[0], reverse=True)
+                        candidate = proposals[0][1]
+                    else:
+                        candidate = dumb_mutate(current_rule, rng)
+                else:
+                    prompt = smart_prompt_simple(current_rule, score_info,
+                                                 target_n_clauses=target_n_clauses)
+                    llm_out = call_llm(prompt)
+                    candidate = parse_rule_from_llm(llm_out)
             except Exception as e:
                 print(f"    [LLM error: {e}] falling back to dumb")
                 candidate = dumb_mutate(current_rule, rng)
@@ -386,15 +461,26 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
         if candidate is None:
             continue
 
-        # Accept if candidate improves; allow controlled downhill to escape local optima
         cand_score = score_rule(candidate, positives, negatives)
         delta = cand_score["score_pct"] - score_info["score_pct"]
-        accept = delta >= 0
-        if not accept:
-            if step == "dumb":
-                accept = rng.random() < 0.15   # 15% chance on random mutation
-            else:
-                accept = delta >= -10.0        # LLM proposals: accept within 10% worse
+
+        # Acceptance rules:
+        #   smart-config or openevolve: always allow -10% to escape local optima
+        #   mixed in refinement phase (score>=80%, fn=0, step=smart): allow -10% so the
+        #     LLM can tighten a specific clause without losing the exploration window
+        #   mixed in exploration phase and dumb-step: strict (delta>=0), prevents cascading
+        #   dumb-config: 15% stochastic accept so it can escape plateau (only exploration)
+        in_refinement = (config == "mixed"
+                         and score_info["score_pct"] >= 80.0
+                         and score_info["fn"] == 0
+                         and step == "smart")
+        if config == "smart" or step == "openevolve" or in_refinement:
+            accept = delta >= -10.0
+        elif config == "dumb":
+            accept = delta >= 0 or rng.random() < 0.15
+        else:
+            accept = delta >= 0
+
         if accept:
             current_rule = candidate
             if cand_score["score_pct"] > best_score_seen:

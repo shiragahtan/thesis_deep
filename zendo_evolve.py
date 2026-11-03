@@ -30,7 +30,8 @@ from mat_framework.targets import phi as phi_of_variant, target_rule
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 if not GROQ_API_KEY:
-    raise EnvironmentError("Set GROQ_API_KEY environment variable before running.")
+    # fallback for local experiments — set this env var before running
+    raise EnvironmentError("Set GROQ_API_KEY before running evolve.py")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
 
 def call_llm(prompt: str, temperature: float = 0.4) -> str:
@@ -101,6 +102,15 @@ def parse_rule_from_llm(text: str) -> Rule | None:
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
+def _clause_accepts(clause_dict: dict, world: "World") -> bool:
+    """Check if a single clause accepts the world."""
+    try:
+        single = Rule.from_dict({"clauses": [clause_dict]})
+        return evaluate(single, world)
+    except Exception:
+        return False
+
+
 def score_rule(rule: Rule, positives: list[World], negatives: list[World]) -> dict:
     tp = sum(1 for w in positives if evaluate(rule, w))
     tn = sum(1 for w in negatives if not evaluate(rule, w))
@@ -110,12 +120,27 @@ def score_rule(rule: Rule, positives: list[World], negatives: list[World]) -> di
     accuracy = (tp + tn) / total
     fp_worlds = [w for w in negatives if evaluate(rule, w)]
     fn_worlds = [w for w in positives if not evaluate(rule, w)]
+
+    # Per-clause attribution: for each FP, which clause(s) accepted it?
+    clauses = rule.to_dict()["clauses"]
+    fp_attribution = []
+    for w in fp_worlds:
+        guilty = [i for i, c in enumerate(clauses) if _clause_accepts(c, w)]
+        fp_attribution.append((w, guilty))
+
+    # For each FN, which clause (if any) is "closest" (accepts it if we relax one condition)?
+    fn_attribution = []
+    for w in fn_worlds:
+        fn_attribution.append((w, []))  # simpler: just show the world for now
+
     return {
         "accuracy": accuracy,
         "score_pct": round(accuracy * 100, 1),
         "tp": tp, "tn": tn, "fp": fp, "fn": fn,
         "false_positives": fp_worlds,
         "false_negatives": fn_worlds,
+        "fp_attribution": fp_attribution,
+        "fn_attribution": fn_attribution,
     }
 
 # ── Mutation operators ────────────────────────────────────────────────────────
@@ -200,27 +225,61 @@ def dumb_mutate(rule: Rule, rng: random.Random) -> Rule:
 # ── LLM prompts ──────────────────────────────────────────────────────────────
 
 def smart_prompt(current_rule: Rule, score_info: dict,
-                 positives: list[World], negatives: list[World]) -> str:
-    fp = score_info["false_positives"][:3]
-    fn = score_info["false_negatives"][:3]
+                 positives: list[World], negatives: list[World],
+                 target_n_clauses: int = 1) -> str:
+    clauses = current_rule.to_dict()["clauses"]
+    n_clauses = len(clauses)
 
-    fp_text = "\n".join(world_to_nl(w) for w in fp) if fp else "  (none)"
-    fn_text = "\n".join(world_to_nl(w) for w in fn) if fn else "  (none)"
+    # Build per-clause FP breakdown
+    fp_lines = []
+    for w, guilty_clauses in score_info["fp_attribution"][:4]:
+        clause_labels = ", ".join(f"clause {i+1}" for i in guilty_clauses) if guilty_clauses else "no clause identified"
+        fp_lines.append(f"  {world_to_nl(w)}\n  → Accepted by: {clause_labels} (TOO BROAD)")
+
+    fn_lines = []
+    for w, _ in score_info["fn_attribution"][:4]:
+        # Show which clauses reject it and why
+        rejected_by = []
+        for i, c in enumerate(clauses):
+            if not _clause_accepts(c, w):
+                rejected_by.append(f"clause {i+1}")
+        fn_lines.append(f"  {world_to_nl(w)}\n  → Rejected by all clauses ({', '.join(rejected_by)}) — rule is TOO SPECIFIC")
+
+    fp_text = "\n".join(fp_lines) if fp_lines else "  (none)"
+    fn_text = "\n".join(fn_lines) if fn_lines else "  (none)"
+
+    # Clause-level diagnosis summary
+    clause_diag = []
+    all_guilty = {}
+    for w, guilty in score_info["fp_attribution"]:
+        for i in guilty:
+            all_guilty[i] = all_guilty.get(i, 0) + 1
+    for i, count in sorted(all_guilty.items()):
+        clause_diag.append(f"  Clause {i+1} causes {count} false positive(s) — needs more constraints")
+    clause_summary = "\n".join(clause_diag) if clause_diag else "  (no per-clause diagnosis)"
 
     return f"""You are finding a hidden rule for the Zendo game.
 A world is POSITIVE (rule holds) or NEGATIVE (rule does not hold).
 
-Current rule:
+Current rule ({n_clauses} clause(s), OR-connected):
 {rule_to_str(current_rule)}
 
-Accuracy: {score_info['score_pct']}%
-False positives (your rule accepted these but they are NEGATIVE):
+Accuracy: {score_info['score_pct']}%  |  false_positives={score_info['fp']}  false_negatives={score_info['fn']}
+
+CLAUSE DIAGNOSIS:
+{clause_summary}
+
+FALSE POSITIVES (your rule accepted these NEGATIVE worlds — rule is too broad):
 {fp_text}
 
-False negatives (your rule rejected these but they are POSITIVE):
+FALSE NEGATIVES (your rule rejected these POSITIVE worlds — rule is too strict):
 {fn_text}
 
-Study the misclassified worlds and propose a BETTER rule that fixes these errors.
+INSTRUCTIONS:
+- For each clause flagged as TOO BROAD: add more specific conditions to reject the false-positive worlds.
+- For each false negative: consider adding a NEW clause (OR branch) that accepts it.
+- Do NOT remove conditions that are helping with true positives.
+- The hidden rule has exactly {target_n_clauses} clause(s) total.
 
 {RULE_FORMAT_HINT}"""
 
@@ -247,12 +306,15 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
     rng = random.Random(seed)
     phi = phi_of_variant(variant)
     target = target_rule(variant)
+    target_n_clauses = len(target.clauses)
 
     # Fixed dataset: 20 positives + 20 negatives
     positives = sample_positives_for(phi, 20, rng, prefix=f"{variant}_pos_s{seed}")
     negatives = sample_negatives_for(phi, 20, rng, prefix=f"{variant}_neg_s{seed}")
 
     current_rule = SEED_RULE
+    best_rule = SEED_RULE
+    best_score_seen = 0.0
     start_time = time.time()
     evals = 0
     history = []
@@ -305,7 +367,8 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             candidate = dumb_mutate(current_rule, rng)
         elif step == "smart":
             try:
-                prompt = smart_prompt(current_rule, score_info, positives, negatives)
+                prompt = smart_prompt(current_rule, score_info, positives, negatives,
+                                      target_n_clauses=target_n_clauses)
                 llm_out = call_llm(prompt)
                 candidate = parse_rule_from_llm(llm_out)
             except Exception as e:
@@ -334,10 +397,16 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
                 accept = delta >= -10.0        # LLM proposals: accept within 10% worse
         if accept:
             current_rule = candidate
+            if cand_score["score_pct"] > best_score_seen:
+                best_rule = candidate
+                best_score_seen = cand_score["score_pct"]
+        # Periodically reset to best seen to prevent cascading backslide
+        elif gen > 0 and gen % 10 == 0 and score_info["score_pct"] < best_score_seen - 5:
+            current_rule = best_rule
 
     elapsed = time.time() - start_time
-    final = score_rule(current_rule, positives, negatives)
-    exact_final = rules_equivalent(current_rule, target)
+    final = score_rule(best_rule, positives, negatives)
+    exact_final = rules_equivalent(best_rule, target)
     print(f"  ✗ NOT SOLVED after {evals} evals ({elapsed:.1f}s), "
           f"best score={final['score_pct']}%")
     return {

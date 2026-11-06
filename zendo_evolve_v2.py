@@ -47,15 +47,25 @@ from mat_framework.targets import phi as phi_of_variant, target_rule
 
 # ── LLM client ────────────────────────────────────────────────────────────────
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    raise EnvironmentError("Set GROQ_API_KEY before running zendo_evolve_v2.py")
-LLM_MODEL = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
+# Backend selection: set LLM_BACKEND=ollama to use a local Ollama model (no token limits).
+# Default: groq (requires GROQ_API_KEY).
+LLM_BACKEND = os.environ.get("LLM_BACKEND", "groq").lower()
+
+if LLM_BACKEND == "ollama":
+    LLM_API_KEY  = "ollama"           # Ollama ignores the key
+    LLM_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    LLM_MODEL    = os.environ.get("LLM_MODEL", "qwen2.5:7b")
+else:
+    LLM_API_KEY  = os.environ.get("GROQ_API_KEY", "")
+    LLM_BASE_URL = "https://api.groq.com/openai/v1"
+    LLM_MODEL    = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
+    if not LLM_API_KEY:
+        raise EnvironmentError("Set GROQ_API_KEY before running (or set LLM_BACKEND=ollama)")
 
 
 def call_llm(prompt: str, temperature: float = 0.4) -> str:
     from openai import OpenAI
-    client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+    client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
     resp = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],

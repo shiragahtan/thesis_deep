@@ -1,0 +1,833 @@
+"""
+zendo_evolve_v2.py
+------------------
+Extended Zendo solver comparing 5 methods:
+  1. random-only       — pure random mutation (baseline)
+  2. llm-only          — LLM proposes rules, no failure signal (OpenEvolve-style)
+  3. failure-informed  — LLM + per-clause attribution failure signal (from v1)
+  4. distance          — failure-informed + distance-based annealed mutations
+  5. version-space     — failure-informed + oracle queries for best discriminating worlds
+
+New features over v1:
+  - Oracle query interface: phi(world) for any sampled world
+  - Distance-based mutation: predicate Hamming distance + annealing schedule
+  - Version-space search: maintain hypothesis pool, find maximally discriminating world
+  - Rule mutation granularity: mutate clause A / clause B / full rule (for multi-clause rules)
+
+Usage:
+    python3 zendo_evolve_v2.py --variant z2 --config distance --seed 42
+    python3 zendo_evolve_v2.py --variant z2 --config version-space --seed 42
+    python3 zendo_evolve_v2.py --variant z1 --config all --seed 42  # run all 5
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import random
+import time
+from collections import defaultdict
+
+from mat_framework.world import (World, Piece, sample_positives_for,
+                                  sample_negatives_for, sample_world,
+                                  world_to_nl, _derive_contacts)
+from mat_framework.rule import (Rule, evaluate, rules_equivalent,
+                                 predicates_used, within_limits, consistent)
+from mat_framework.targets import phi as phi_of_variant, target_rule
+
+# ── LLM client ────────────────────────────────────────────────────────────────
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise EnvironmentError("Set GROQ_API_KEY before running zendo_evolve_v2.py")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
+
+
+def call_llm(prompt: str, temperature: float = 0.4) -> str:
+    from openai import OpenAI
+    client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+    resp = client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=temperature,
+        max_tokens=1024,
+    )
+    return resp.choices[0].message.content.strip()
+
+
+# ── Domain constants ──────────────────────────────────────────────────────────
+
+UNARY_PREDS  = ["red", "blue", "green", "small", "medium", "large",
+                 "upright", "lhs", "rhs"]
+BINARY_PREDS = ["contact", "same_coord1"]
+COLORS   = ["red", "blue", "green"]
+SIZES    = ["small", "medium", "large"]
+ORIENTS  = ["upright", "lhs", "rhs"]
+VALUE_FAMILIES = [COLORS, SIZES, ORIENTS]
+
+RULE_FORMAT_HINT = """
+A rule is a JSON object with this schema:
+{
+  "clauses": [
+    {
+      "conditions": [
+        {"pred": "piece",    "args": ["W", "P"]},
+        {"pred": "blue",     "args": ["P"]},
+        {"pred": "contact",  "args": ["P", "Q"]},
+        {"pred": "red",      "args": ["Q"]}
+      ]
+    }
+  ]
+}
+
+Available predicates:
+  piece(W, P)        — P is a piece in world W  [always include this first]
+  contact(P, Q)      — P and Q are touching
+  same_coord1(P, Q)  — P and Q share the same x-coordinate
+  red(P) / blue(P) / green(P)         — colour
+  small(P) / medium(P) / large(P)     — size
+  upright(P) / lhs(P) / rhs(P)        — orientation
+
+Rules are OR over clauses; each clause is AND over conditions.
+Variables: W = world, P/Q/R = pieces (uppercase strings).
+Every clause must include piece(W, P) for each distinct piece variable used.
+Return ONLY the JSON — no explanation.
+"""
+
+SEED_RULE = Rule.from_dict({"clauses": [{"conditions": [
+    {"pred": "piece", "args": ["W", "P"]}
+]}]})
+
+
+# ── Distance helpers ──────────────────────────────────────────────────────────
+
+def predicate_multiset(rule: Rule) -> list[str]:
+    """All predicate names in the rule (duplicates kept per occurrence)."""
+    return [c.pred for cl in rule.clauses for c in cl.conditions]
+
+
+def predicate_distance(r1: Rule, r2: Rule) -> int:
+    """Hamming-style distance on predicate multisets (symmetric difference size)."""
+    m1 = defaultdict(int)
+    m2 = defaultdict(int)
+    for p in predicate_multiset(r1):
+        m1[p] += 1
+    for p in predicate_multiset(r2):
+        m2[p] += 1
+    all_keys = set(m1) | set(m2)
+    return sum(abs(m1[k] - m2[k]) for k in all_keys)
+
+
+def semantic_distance(r1: Rule, r2: Rule, worlds: list[World]) -> float:
+    """Fraction of worlds where r1 and r2 disagree."""
+    if not worlds:
+        return 0.0
+    disagree = sum(1 for w in worlds if evaluate(r1, w) != evaluate(r2, w))
+    return disagree / len(worlds)
+
+
+# ── Rule generation and mutation ──────────────────────────────────────────────
+
+def _random_clause(rng: random.Random) -> dict:
+    """Generate a random meaningful clause with 2-5 conditions."""
+    conds = [{"pred": "piece", "args": ["W", "P"]}]
+    if rng.random() < 0.7:
+        conds.append({"pred": rng.choice(COLORS),   "args": ["P"]})
+    if rng.random() < 0.4:
+        conds.append({"pred": rng.choice(SIZES),    "args": ["P"]})
+    if rng.random() < 0.3:
+        conds.append({"pred": rng.choice(ORIENTS),  "args": ["P"]})
+    if rng.random() < 0.5:
+        rel = rng.choice(BINARY_PREDS)
+        conds.append({"pred": "piece",  "args": ["W", "Q"]})
+        conds.append({"pred": rel,      "args": ["P", "Q"]})
+        if rng.random() < 0.6:
+            conds.append({"pred": rng.choice(COLORS), "args": ["Q"]})
+        if rng.random() < 0.3:
+            conds.append({"pred": rng.choice(SIZES),  "args": ["Q"]})
+    return {"conditions": conds}
+
+
+def _clauses_distance(c1: dict, c2: dict) -> int:
+    """Predicate Hamming between two clause dicts."""
+    m1 = defaultdict(int)
+    m2 = defaultdict(int)
+    for cond in c1["conditions"]:
+        m1[cond["pred"]] += 1
+    for cond in c2["conditions"]:
+        m2[cond["pred"]] += 1
+    all_keys = set(m1) | set(m2)
+    return sum(abs(m1[k] - m2[k]) for k in all_keys)
+
+
+def _dumb_mutate_clause_bounded(clause: dict, rng: random.Random,
+                                  max_distance: int) -> dict:
+    """Mutate a single clause, keeping predicate-distance from original ≤ max_distance."""
+    for _ in range(20):
+        new_clause = _dumb_mutate_clause(clause, rng)
+        if _clauses_distance(clause, new_clause) <= max_distance:
+            return new_clause
+    return _random_clause(rng)
+
+
+def _dumb_mutate_clause(clause: dict, rng: random.Random) -> dict:
+    """Single-clause mutation: swap pred, drop condition, add condition."""
+    import copy
+    clause = copy.deepcopy(clause)
+    conds = clause["conditions"]
+
+    op = rng.choices(["swap_pred", "drop_condition", "add_condition"],
+                     weights=[4, 2, 2], k=1)[0]
+
+    if op == "swap_pred":
+        unary = [i for i, c in enumerate(conds) if c["pred"] in UNARY_PREDS]
+        if unary:
+            i = rng.choice(unary)
+            family = next((f for f in VALUE_FAMILIES if conds[i]["pred"] in f), COLORS)
+            alternatives = [p for p in family if p != conds[i]["pred"]] or UNARY_PREDS
+            conds[i] = {"pred": rng.choice(alternatives), "args": conds[i]["args"]}
+    elif op == "drop_condition":
+        droppable = [i for i, c in enumerate(conds) if c["pred"] != "piece"]
+        if droppable:
+            conds.pop(rng.choice(droppable))
+    elif op == "add_condition":
+        vars_in_clause = {a for c in conds for a in c["args"]
+                          if a and a[0].isupper() and a != "W"}
+        if rng.random() < 0.5 and vars_in_clause:
+            v = rng.choice(list(vars_in_clause))
+            conds.append({"pred": rng.choice(UNARY_PREDS), "args": [v]})
+        else:
+            conds.append({"pred": rng.choice(UNARY_PREDS), "args": ["P"]})
+
+    return clause
+
+
+def dumb_mutate(rule: Rule, rng: random.Random,
+                target_clause_idx: int | None = None) -> Rule:
+    """Random mutation. If target_clause_idx given, mutate only that clause."""
+    import copy
+    d = rule.to_dict()
+    clauses = d["clauses"]
+    if not clauses:
+        return rule
+
+    if target_clause_idx is not None and 0 <= target_clause_idx < len(clauses):
+        idx = target_clause_idx
+    else:
+        op = rng.choices(["mutate_clause", "replace_clause", "add_clause"],
+                         weights=[3, 3, 1], k=1)[0]
+        idx = rng.randrange(len(clauses))
+        if op == "replace_clause":
+            d["clauses"][idx] = _random_clause(rng)
+            try:
+                return Rule.from_dict(d)
+            except Exception:
+                return rule
+        elif op == "add_clause":
+            d["clauses"].append(_random_clause(rng))
+            try:
+                return Rule.from_dict(d)
+            except Exception:
+                return rule
+
+    clauses[idx] = _dumb_mutate_clause(clauses[idx], rng)
+    try:
+        return Rule.from_dict(d)
+    except Exception:
+        return rule
+
+
+def distance_mutate(rule: Rule, rng: random.Random,
+                    max_step: float, target_clause_idx: int | None = None) -> Rule:
+    """Distance-aware mutation: predicate Hamming distance from original ≤ max_step.
+
+    At large max_step (exploration phase), allows big jumps (replace_clause).
+    At small max_step (refinement phase), restricts to small edits.
+    """
+    import copy
+    d = copy.deepcopy(rule.to_dict())
+    clauses = d["clauses"]
+    if not clauses:
+        return rule
+
+    if target_clause_idx is not None:
+        idx = target_clause_idx
+    else:
+        idx = rng.randrange(len(clauses))
+
+    # Large step: full replacement allowed
+    if max_step >= 6:
+        d["clauses"][idx] = _random_clause(rng)
+    else:
+        d["clauses"][idx] = _dumb_mutate_clause_bounded(
+            clauses[idx], rng, max_distance=int(max_step))
+
+    try:
+        return Rule.from_dict(d)
+    except Exception:
+        return rule
+
+
+def anneal_step(gen: int, max_evals: int, initial: float = 10.0, final: float = 1.0) -> float:
+    """Exponential annealing: max_step decreases from initial to final over eval budget."""
+    t = gen / max(max_evals - 1, 1)
+    return final + (initial - final) * (1 - t) ** 2
+
+
+# ── Scoring ───────────────────────────────────────────────────────────────────
+
+def _clause_accepts(clause_dict: dict, world: World) -> bool:
+    try:
+        single = Rule.from_dict({"clauses": [clause_dict]})
+        return evaluate(single, world)
+    except Exception:
+        return False
+
+
+def score_rule(rule: Rule, positives: list[World], negatives: list[World]) -> dict:
+    tp = sum(1 for w in positives if evaluate(rule, w))
+    tn = sum(1 for w in negatives if not evaluate(rule, w))
+    fp = len(negatives) - tn
+    fn = len(positives) - tp
+    total = len(positives) + len(negatives)
+    accuracy = (tp + tn) / total
+    fp_worlds = [w for w in negatives if evaluate(rule, w)]
+    fn_worlds = [w for w in positives if not evaluate(rule, w)]
+
+    clauses = rule.to_dict()["clauses"]
+    fp_attribution = []
+    for w in fp_worlds:
+        guilty = [i for i, c in enumerate(clauses) if _clause_accepts(c, w)]
+        fp_attribution.append((w, guilty))
+    fn_attribution = [(w, []) for w in fn_worlds]
+
+    return {
+        "accuracy": accuracy,
+        "score_pct": round(accuracy * 100, 1),
+        "tp": tp, "tn": tn, "fp": fp, "fn": fn,
+        "false_positives": fp_worlds,
+        "false_negatives": fn_worlds,
+        "fp_attribution": fp_attribution,
+        "fn_attribution": fn_attribution,
+    }
+
+
+# ── LLM prompts ──────────────────────────────────────────────────────────────
+
+def _prompt_simple(rule: Rule, score_info: dict, n_clauses: int) -> str:
+    fp = score_info["false_positives"][:3]
+    fn = score_info["false_negatives"][:3]
+    fp_text = "\n".join(world_to_nl(w) for w in fp) if fp else "  (none)"
+    fn_text = "\n".join(world_to_nl(w) for w in fn) if fn else "  (none)"
+    return f"""You are finding a hidden rule for the Zendo game (exactly {n_clauses} clause(s)).
+A world is POSITIVE (rule holds) or NEGATIVE (rule does not hold).
+
+Current rule:
+{json.dumps(rule.to_dict(), indent=2)}
+
+Accuracy: {score_info['score_pct']}%  (fp={score_info['fp']} fn={score_info['fn']})
+
+False positives (rule accepted these but they are NEGATIVE):
+{fp_text}
+
+False negatives (rule rejected these but they are POSITIVE):
+{fn_text}
+
+Propose a BETTER rule that fixes these errors.
+
+{RULE_FORMAT_HINT}"""
+
+
+def _prompt_attributed(rule: Rule, score_info: dict,
+                       positives: list[World], negatives: list[World],
+                       n_clauses: int) -> str:
+    clauses = rule.to_dict()["clauses"]
+    fp_lines = []
+    for w, guilty in score_info["fp_attribution"][:4]:
+        label = ", ".join(f"clause {i+1}" for i in guilty) if guilty else "unknown"
+        fp_lines.append(f"  {world_to_nl(w)}\n  → Accepted by: {label} (TOO BROAD)")
+    fn_lines = []
+    for w, _ in score_info["fn_attribution"][:4]:
+        rejected = [f"clause {i+1}" for i, c in enumerate(clauses)
+                    if not _clause_accepts(c, w)]
+        fn_lines.append(f"  {world_to_nl(w)}\n  → Rejected by: {', '.join(rejected)}")
+    fp_text = "\n".join(fp_lines) if fp_lines else "  (none)"
+    fn_text = "\n".join(fn_lines) if fn_lines else "  (none)"
+
+    # Per-clause: show TP examples alongside FP examples
+    guilty_counts: dict[int, int] = {}
+    for _, guilty in score_info["fp_attribution"]:
+        for i in guilty:
+            guilty_counts[i] = guilty_counts.get(i, 0) + 1
+    diag_lines = []
+    for i, count in sorted(guilty_counts.items()):
+        tp_ex = [w for w in positives if _clause_accepts(clauses[i], w)][:3]
+        diag_lines.append(
+            f"\n  Clause {i+1} causes {count} false positive(s)"
+        )
+        if tp_ex:
+            tp_text = "; ".join(world_to_nl(w) for w in tp_ex)
+            diag_lines.append(f"  Clause {i+1} CORRECTLY accepts (keep): {tp_text}")
+    clause_summary = "\n".join(diag_lines) if diag_lines else "  (no per-clause diagnosis)"
+
+    return f"""You are finding a hidden rule for the Zendo game.
+
+Current rule ({len(clauses)} clause(s), OR-connected):
+{json.dumps(rule.to_dict(), indent=2)}
+
+Accuracy: {score_info['score_pct']}%  |  fp={score_info['fp']}  fn={score_info['fn']}
+
+CLAUSE DIAGNOSIS:
+{clause_summary}
+
+FALSE POSITIVES (rule accepted these NEGATIVE worlds):
+{fp_text}
+
+FALSE NEGATIVES (rule rejected these POSITIVE worlds):
+{fn_text}
+
+INSTRUCTIONS:
+- For each guilty clause: add a condition present in the CORRECT worlds but absent in FP worlds.
+- Do NOT remove conditions that help with true positives.
+- The rule has exactly {n_clauses} clause(s) total.
+
+{RULE_FORMAT_HINT}"""
+
+
+def _prompt_openevolve(positives: list[World], negatives: list[World],
+                       rule: Rule) -> str:
+    pos_text = "\n".join(world_to_nl(w) for w in positives[:8])
+    neg_text = "\n".join(world_to_nl(w) for w in negatives[:8])
+    return f"""You are finding a hidden rule for the Zendo game.
+
+POSITIVE worlds (rule holds):
+{pos_text}
+
+NEGATIVE worlds (rule does not hold):
+{neg_text}
+
+Current rule (propose something better):
+{json.dumps(rule.to_dict(), indent=2)}
+
+{RULE_FORMAT_HINT}"""
+
+
+def _prompt_version_space_query(h_pool: list[Rule], n_clauses: int,
+                                 existing_evidence: list[tuple[World, bool]]) -> str:
+    """Ask the LLM to propose a discriminating world to distinguish between hypotheses."""
+    sample_rules = h_pool[:4]
+    rules_text = "\n\n".join(
+        f"Hypothesis {i+1}:\n{json.dumps(r.to_dict(), indent=2)}"
+        for i, r in enumerate(sample_rules)
+    )
+    evidence_text = "\n".join(
+        f"  World {w.id}: {'POSITIVE' if lbl else 'NEGATIVE'}"
+        for w, lbl in existing_evidence[-5:]
+    ) or "  (none yet)"
+
+    return f"""You are helping to identify the correct hidden rule in the Zendo game.
+
+There are {len(h_pool)} candidate rules. Here are some of them:
+
+{rules_text}
+
+Recent oracle evidence:
+{evidence_text}
+
+Your task: design a world that BEST DISTINGUISHES between these hypotheses.
+The ideal world should be POSITIVE under some hypotheses and NEGATIVE under others,
+splitting them as evenly as possible.
+
+Describe the world as a JSON object with this schema:
+{{
+  "pieces": [
+    {{"color": "red", "size": 5, "orient": "upright", "x": 3, "y": 4}},
+    {{"color": "blue", "size": 2, "orient": "lhs",    "x": 3, "y": 5}}
+  ]
+}}
+
+Colors: red, blue, green
+Orientations: upright, lhs, rhs
+Size: 0-10 (small≤3, medium 4-6, large≥7)
+x, y: 0-10
+
+Return ONLY the JSON world description — no explanation.
+"""
+
+
+def parse_rule_from_llm(text: str) -> Rule | None:
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end == 0:
+        return None
+    try:
+        d = json.loads(text[start:end])
+        return Rule.from_dict(d)
+    except Exception:
+        return None
+
+
+def parse_world_from_llm(text: str, world_id: str) -> World | None:
+    """Parse a world description from LLM output."""
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start == -1 or end == 0:
+        return None
+    try:
+        d = json.loads(text[start:end])
+        pieces_data = d.get("pieces", [])
+        pieces = []
+        for i, pd in enumerate(pieces_data):
+            pieces.append(Piece(
+                id=f"{world_id}_p{i}",
+                x=int(pd.get("x", 5)),
+                y=int(pd.get("y", 5)),
+                size=int(pd.get("size", 5)),
+                color=pd.get("color", "red"),
+                orient=pd.get("orient", "upright"),
+            ))
+        return World(id=world_id, pieces=pieces, contacts=_derive_contacts(pieces))
+    except Exception:
+        return None
+
+
+# ── Version-space helpers ─────────────────────────────────────────────────────
+
+def _generate_hypothesis_pool(n: int, rng: random.Random,
+                               evidence: list[tuple[World, bool]],
+                               n_clauses: int) -> list[Rule]:
+    """Generate a pool of random rules consistent with labeled evidence."""
+    pool = []
+    attempts = 0
+    while len(pool) < n and attempts < n * 50:
+        attempts += 1
+        # Build a rule with the right number of clauses
+        clauses = [_random_clause(rng) for _ in range(n_clauses)]
+        try:
+            rule = Rule.from_dict({"clauses": clauses})
+            if consistent(rule, evidence):
+                pool.append(rule)
+        except Exception:
+            pass
+    return pool
+
+
+def _best_discriminating_world(h_pool: list[Rule],
+                                 candidate_worlds: list[World]) -> World | None:
+    """Find the world W in candidates that best splits the hypothesis pool.
+
+    Optimal split: maximize min(|pos_subset|, |neg_subset|).
+    """
+    if not h_pool or not candidate_worlds:
+        return None
+    best_world = None
+    best_split = -1
+    for w in candidate_worlds:
+        pos_count = sum(1 for r in h_pool if evaluate(r, w))
+        neg_count = len(h_pool) - pos_count
+        split_quality = min(pos_count, neg_count)
+        if split_quality > best_split:
+            best_split = split_quality
+            best_world = w
+    return best_world
+
+
+def _eliminate_inconsistent(h_pool: list[Rule],
+                              world: World, oracle_label: bool) -> list[Rule]:
+    """Remove hypotheses inconsistent with the oracle's answer for world."""
+    return [r for r in h_pool if evaluate(r, world) == oracle_label]
+
+
+# ── Main evolutionary loop ────────────────────────────────────────────────────
+
+def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
+    rng = random.Random(seed)
+    phi = phi_of_variant(variant)
+    target = target_rule(variant)
+    n_clauses = len(target.clauses)
+
+    # Fixed labeled dataset
+    positives = sample_positives_for(phi, 20, rng, prefix=f"{variant}_pos_s{seed}")
+    negatives = sample_negatives_for(phi, 20, rng, prefix=f"{variant}_neg_s{seed}")
+
+    # Oracle evidence accumulator (for version-space)
+    oracle_evidence: list[tuple[World, bool]] = (
+        [(w, True) for w in positives] + [(w, False) for w in negatives]
+    )
+
+    # Unlabeled world pool for oracle queries and version-space discriminators
+    # (sample a large set once; oracle labels them on demand)
+    query_pool = [sample_world(f"{variant}_q_s{seed}_{i}", rng)
+                  for i in range(200)]
+
+    current_rule = SEED_RULE
+    best_rule = SEED_RULE
+    best_score_seen = 0.0
+    start_time = time.time()
+    evals = 0
+    history = []
+    oracle_queries = 0
+
+    # Version-space: hypothesis pool (consistent with current evidence)
+    h_pool: list[Rule] = []
+    if config == "version-space":
+        h_pool = _generate_hypothesis_pool(50, rng, oracle_evidence, n_clauses)
+        print(f"  Version-space: initial pool = {len(h_pool)} hypotheses")
+
+    print(f"\n[{variant.upper()} | {config} | seed {seed}]")
+    print(f"  Dataset: {len(positives)} positives, {len(negatives)} negatives")
+
+    for gen in range(max_evals):
+        evals += 1
+        score_info = score_rule(current_rule, positives, negatives)
+        exact = rules_equivalent(current_rule, target)
+
+        history.append({
+            "gen": gen,
+            "score_pct": score_info["score_pct"],
+            "exact_match": exact,
+            "evals": evals,
+            "oracle_queries": oracle_queries,
+        })
+
+        print(f"  Gen {gen:3d} | score={score_info['score_pct']:5.1f}% | "
+              f"fp={score_info['fp']} fn={score_info['fn']} | exact={exact}"
+              + (f" | pool={len(h_pool)}" if config == "version-space" else ""))
+
+        if score_info["score_pct"] >= 95.0 or exact:
+            elapsed = time.time() - start_time
+            label = "EXACT" if exact else "95%+"
+            print(f"  SOLVED ({label}) at eval {evals} in {elapsed:.1f}s "
+                  f"[oracle_queries={oracle_queries}]")
+            return {
+                "variant": variant, "config": config, "seed": seed,
+                "solved": True, "exact_match": exact,
+                "evals": evals, "elapsed": elapsed,
+                "final_score": score_info["score_pct"],
+                "oracle_queries": oracle_queries,
+                "history": history,
+            }
+
+        # ── Step selection per config ──────────────────────────────────────────
+
+        if config == "random-only":
+            candidate = dumb_mutate(current_rule, rng)
+
+        elif config == "llm-only":
+            try:
+                prompt = _prompt_openevolve(positives, negatives, current_rule)
+                out = call_llm(prompt)
+                candidate = parse_rule_from_llm(out) or dumb_mutate(current_rule, rng)
+            except Exception as e:
+                print(f"    [LLM error: {e}]")
+                candidate = dumb_mutate(current_rule, rng)
+
+        elif config == "failure-informed":
+            try:
+                refinement = (score_info["score_pct"] >= 80.0 and score_info["fn"] == 0)
+                if refinement:
+                    prompt = _prompt_attributed(current_rule, score_info,
+                                                positives, negatives, n_clauses)
+                    proposals = []
+                    for _ in range(3):
+                        try:
+                            out = call_llm(prompt, temperature=0.6)
+                            p = parse_rule_from_llm(out)
+                            if p is not None:
+                                ps = score_rule(p, positives, negatives)
+                                proposals.append((ps["score_pct"], p))
+                        except Exception:
+                            pass
+                    if proposals:
+                        proposals.sort(key=lambda x: x[0], reverse=True)
+                        candidate = proposals[0][1]
+                    else:
+                        candidate = dumb_mutate(current_rule, rng)
+                else:
+                    prompt = _prompt_simple(current_rule, score_info, n_clauses)
+                    out = call_llm(prompt)
+                    candidate = parse_rule_from_llm(out) or dumb_mutate(current_rule, rng)
+            except Exception as e:
+                print(f"    [LLM error: {e}]")
+                candidate = dumb_mutate(current_rule, rng)
+
+        elif config == "distance":
+            # Annealed distance-based mutation.
+            # Every 3rd step: use LLM for direction; random steps fill the rest.
+            # Mutation target: pick worst-performing clause (most FP) or random.
+            max_step = anneal_step(gen, max_evals, initial=10.0, final=1.0)
+
+            # Identify which clause is most responsible for FPs
+            guilty_counts: dict[int, int] = {}
+            for _, guilty in score_info["fp_attribution"]:
+                for i in guilty:
+                    guilty_counts[i] = guilty_counts.get(i, 0) + 1
+            worst_clause = (max(guilty_counts, key=guilty_counts.get)
+                            if guilty_counts else None)
+
+            if gen % 3 == 0:
+                # LLM step: use failure signal
+                try:
+                    refinement = (score_info["score_pct"] >= 80.0 and score_info["fn"] == 0)
+                    if refinement:
+                        prompt = _prompt_attributed(current_rule, score_info,
+                                                    positives, negatives, n_clauses)
+                        out = call_llm(prompt, temperature=0.6)
+                    else:
+                        prompt = _prompt_simple(current_rule, score_info, n_clauses)
+                        out = call_llm(prompt)
+                    candidate = parse_rule_from_llm(out)
+                    if candidate is None:
+                        candidate = distance_mutate(current_rule, rng, max_step, worst_clause)
+                except Exception as e:
+                    print(f"    [LLM error: {e}]")
+                    candidate = distance_mutate(current_rule, rng, max_step, worst_clause)
+            else:
+                # Distance-bounded random step
+                candidate = distance_mutate(current_rule, rng, max_step, worst_clause)
+
+        elif config == "version-space":
+            # Every K steps, use version-space oracle query to prune hypotheses.
+            # Between queries, use failure-informed LLM or distance mutation.
+
+            VS_QUERY_INTERVAL = 5
+
+            if gen % VS_QUERY_INTERVAL == 0 and len(h_pool) > 1:
+                # Find best discriminating world using our algorithm
+                disc_world = _best_discriminating_world(h_pool, query_pool)
+
+                if disc_world is None:
+                    # Fall back to LLM-generated discriminating world
+                    try:
+                        prompt = _prompt_version_space_query(
+                            h_pool, n_clauses, oracle_evidence[-10:])
+                        out = call_llm(prompt, temperature=0.5)
+                        disc_world = parse_world_from_llm(out, f"vs_q{gen}")
+                    except Exception as e:
+                        print(f"    [VS query LLM error: {e}]")
+
+                if disc_world is not None:
+                    oracle_label = phi(disc_world)
+                    oracle_queries += 1
+                    oracle_evidence.append((disc_world, oracle_label))
+                    old_size = len(h_pool)
+                    h_pool = _eliminate_inconsistent(h_pool, disc_world, oracle_label)
+                    print(f"    [VS] oracle({disc_world.id})={'POS' if oracle_label else 'NEG'} "
+                          f"| pool: {old_size} → {len(h_pool)}")
+
+                    # Replenish pool if too small
+                    if len(h_pool) < 10:
+                        new_hyps = _generate_hypothesis_pool(
+                            30, rng, oracle_evidence, n_clauses)
+                        h_pool.extend(new_hyps)
+                        print(f"    [VS] replenished pool to {len(h_pool)}")
+
+                    # Pick the best hypothesis in the pool as the new current rule
+                    if h_pool:
+                        ranked = sorted(
+                            h_pool,
+                            key=lambda r: score_rule(r, positives, negatives)["score_pct"],
+                            reverse=True
+                        )
+                        candidate = ranked[0]
+                    else:
+                        candidate = dumb_mutate(current_rule, rng)
+                else:
+                    candidate = dumb_mutate(current_rule, rng)
+            else:
+                # Non-query step: failure-informed mutation
+                try:
+                    refinement = (score_info["score_pct"] >= 80.0 and score_info["fn"] == 0)
+                    if refinement:
+                        prompt = _prompt_attributed(current_rule, score_info,
+                                                    positives, negatives, n_clauses)
+                        proposals = []
+                        for _ in range(2):
+                            try:
+                                out = call_llm(prompt, temperature=0.6)
+                                p = parse_rule_from_llm(out)
+                                if p is not None:
+                                    ps = score_rule(p, positives, negatives)
+                                    proposals.append((ps["score_pct"], p))
+                            except Exception:
+                                pass
+                        if proposals:
+                            proposals.sort(key=lambda x: x[0], reverse=True)
+                            candidate = proposals[0][1]
+                        else:
+                            candidate = dumb_mutate(current_rule, rng)
+                    else:
+                        prompt = _prompt_simple(current_rule, score_info, n_clauses)
+                        out = call_llm(prompt)
+                        candidate = parse_rule_from_llm(out) or dumb_mutate(current_rule, rng)
+                except Exception as e:
+                    print(f"    [LLM error: {e}]")
+                    candidate = dumb_mutate(current_rule, rng)
+        else:
+            raise ValueError(f"Unknown config: {config}")
+
+        if candidate is None:
+            continue
+
+        cand_score = score_rule(candidate, positives, negatives)
+        delta = cand_score["score_pct"] - score_info["score_pct"]
+
+        # Acceptance: smart/LLM configs allow -10% to escape local optima
+        if config in ("random-only",):
+            accept = delta >= 0 or rng.random() < 0.15
+        else:
+            accept = delta >= -10.0
+
+        if accept:
+            current_rule = candidate
+            if cand_score["score_pct"] > best_score_seen:
+                best_rule = candidate
+                best_score_seen = cand_score["score_pct"]
+
+        # Periodic reset to best seen
+        elif gen > 0 and gen % 10 == 0 and score_info["score_pct"] < best_score_seen - 5:
+            current_rule = best_rule
+
+    elapsed = time.time() - start_time
+    final = score_rule(best_rule, positives, negatives)
+    exact_final = rules_equivalent(best_rule, target)
+    print(f"  NOT SOLVED after {evals} evals ({elapsed:.1f}s), "
+          f"best={final['score_pct']}% [oracle_queries={oracle_queries}]")
+    return {
+        "variant": variant, "config": config, "seed": seed,
+        "solved": False, "exact_match": exact_final,
+        "evals": evals, "elapsed": elapsed,
+        "final_score": final["score_pct"],
+        "oracle_queries": oracle_queries,
+        "history": history,
+    }
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+CONFIGS = ["random-only", "llm-only", "failure-informed", "distance", "version-space"]
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--variant",   default="z1",
+                        choices=["z1", "z2", "z3"])
+    parser.add_argument("--config",    default="failure-informed",
+                        choices=CONFIGS + ["all"])
+    parser.add_argument("--seed",      type=int, default=42)
+    parser.add_argument("--max-evals", type=int, default=80)
+    args = parser.parse_args()
+
+    if args.config == "all":
+        results = []
+        for cfg in CONFIGS:
+            r = run(args.variant, cfg, args.seed, args.max_evals)
+            results.append(r)
+        print("\n=== SUMMARY ===")
+        print(f"{'Config':<20} {'Solved':<8} {'Evals':<8} {'Score':<8} {'OracleQ':<8}")
+        for r in results:
+            print(f"  {r['config']:<18} {str(r['solved']):<8} "
+                  f"{r['evals']:<8} {r['final_score']:<8} {r['oracle_queries']:<8}")
+        print(json.dumps(results, indent=2))
+    else:
+        result = run(args.variant, args.config, args.seed, args.max_evals)
+        print(json.dumps(result, indent=2))

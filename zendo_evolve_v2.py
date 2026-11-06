@@ -2,19 +2,29 @@
 zendo_evolve_v2.py
 ------------------
 Extended Zendo solver comparing 5 methods:
-  1. random-only       — pure random mutation (baseline)
-  2. llm-only          — LLM proposes rules, no failure signal (OpenEvolve-style)
-  3. failure-informed  — LLM + per-clause attribution failure signal (from v1)
-  4. distance          — failure-informed + distance-based annealed mutations
-  5. version-space     — failure-informed + oracle queries for best discriminating worlds
+
+  1. random-only    — pure random mutation baseline (no LLM)
+  2. llm-only       — LLM proposes rules, sees examples but NOT which are wrong
+                      (OpenEvolve-style; same LLM as all other methods)
+  3. our-evolve     — 70% LLM with failure signal + 30% random mutation
+                      (adaptive: switches to 100% LLM in refinement phase)
+                      THIS IS OUR MAIN METHOD — the 30/70 mix
+  4. distance       — our-evolve + distance-based annealed mutations
+                      (step size anneals from large exploration to small refinement)
+  5. version-space  — our-evolve + oracle queries for best discriminating worlds
+                      (AlphaEvolve finds maximally informative query; oracle eliminates rules)
+
+All methods use the same LLM: qwen/qwen3.8-27b via Groq API.
+"llm-only" is a same-LLM same-budget ablation of our-evolve (failure signal removed).
 
 New features over v1:
   - Oracle query interface: phi(world) for any sampled world
   - Distance-based mutation: predicate Hamming distance + annealing schedule
   - Version-space search: maintain hypothesis pool, find maximally discriminating world
-  - Rule mutation granularity: mutate clause A / clause B / full rule (for multi-clause rules)
+  - Rule mutation granularity: target worst-performing clause by FP count
 
 Usage:
+    python3 zendo_evolve_v2.py --variant z2 --config our-evolve --seed 42
     python3 zendo_evolve_v2.py --variant z2 --config distance --seed 42
     python3 zendo_evolve_v2.py --variant z2 --config version-space --seed 42
     python3 zendo_evolve_v2.py --variant z1 --config all --seed 42  # run all 5
@@ -622,39 +632,58 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
                 print(f"    [LLM error: {e}]")
                 candidate = dumb_mutate(current_rule, rng)
 
-        elif config == "failure-informed":
-            try:
-                refinement = (score_info["score_pct"] >= 80.0 and score_info["fn"] == 0)
-                if refinement:
-                    prompt = _prompt_attributed(current_rule, score_info,
-                                                positives, negatives, n_clauses)
-                    proposals = []
-                    for _ in range(3):
-                        try:
-                            out = call_llm(prompt, temperature=0.6)
-                            p = parse_rule_from_llm(out)
-                            if p is not None:
-                                ps = score_rule(p, positives, negatives)
-                                proposals.append((ps["score_pct"], p))
-                        except Exception:
-                            pass
-                    if proposals:
-                        proposals.sort(key=lambda x: x[0], reverse=True)
-                        candidate = proposals[0][1]
-                    else:
-                        candidate = dumb_mutate(current_rule, rng)
+        elif config in ("failure-informed", "our-evolve"):
+            # failure-informed: pure LLM with failure signal (smart-only ablation)
+            # our-evolve:       70% LLM with failure signal + 30% random (THE MAIN METHOD)
+            #   adaptive: when score>=80% and fn=0, switch to 100% LLM for refinement
+            if config == "our-evolve":
+                fn_now = score_info["fn"]
+                score_now = score_info["score_pct"]
+                if score_now >= 80.0 and fn_now == 0:
+                    smart_prob = 1.0   # refinement: pure LLM
+                elif score_now >= 65.0:
+                    smart_prob = 0.85  # mostly LLM once structure is emerging
                 else:
-                    prompt = _prompt_simple(current_rule, score_info, n_clauses)
-                    out = call_llm(prompt)
-                    candidate = parse_rule_from_llm(out) or dumb_mutate(current_rule, rng)
-            except Exception as e:
-                print(f"    [LLM error: {e}]")
+                    smart_prob = 0.7   # exploration: 70/30 split
+                use_llm = rng.random() < smart_prob
+            else:
+                use_llm = True  # failure-informed always uses LLM
+
+            if not use_llm:
                 candidate = dumb_mutate(current_rule, rng)
+            else:
+                try:
+                    refinement = (score_info["score_pct"] >= 80.0 and score_info["fn"] == 0)
+                    if refinement:
+                        prompt = _prompt_attributed(current_rule, score_info,
+                                                    positives, negatives, n_clauses)
+                        proposals = []
+                        for _ in range(3):
+                            try:
+                                out = call_llm(prompt, temperature=0.6)
+                                p = parse_rule_from_llm(out)
+                                if p is not None:
+                                    ps = score_rule(p, positives, negatives)
+                                    proposals.append((ps["score_pct"], p))
+                            except Exception:
+                                pass
+                        if proposals:
+                            proposals.sort(key=lambda x: x[0], reverse=True)
+                            candidate = proposals[0][1]
+                        else:
+                            candidate = dumb_mutate(current_rule, rng)
+                    else:
+                        prompt = _prompt_simple(current_rule, score_info, n_clauses)
+                        out = call_llm(prompt)
+                        candidate = parse_rule_from_llm(out) or dumb_mutate(current_rule, rng)
+                except Exception as e:
+                    print(f"    [LLM error: {e}]")
+                    candidate = dumb_mutate(current_rule, rng)
 
         elif config == "distance":
-            # Annealed distance-based mutation.
-            # Every 3rd step: use LLM for direction; random steps fill the rest.
-            # Mutation target: pick worst-performing clause (most FP) or random.
+            # our-evolve + distance-annealed mutations.
+            # Same 70/30 split as our-evolve, but random steps are distance-bounded.
+            # Annealing: large steps early (exploration), small steps late (refinement).
             max_step = anneal_step(gen, max_evals, initial=10.0, final=1.0)
 
             # Identify which clause is most responsible for FPs
@@ -665,10 +694,23 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             worst_clause = (max(guilty_counts, key=guilty_counts.get)
                             if guilty_counts else None)
 
-            if gen % 3 == 0:
-                # LLM step: use failure signal
+            # Same adaptive 70/30 split as our-evolve
+            score_now = score_info["score_pct"]
+            fn_now = score_info["fn"]
+            if score_now >= 80.0 and fn_now == 0:
+                smart_prob = 1.0
+            elif score_now >= 65.0:
+                smart_prob = 0.85
+            else:
+                smart_prob = 0.7
+
+            use_llm = rng.random() < smart_prob
+            if not use_llm:
+                # Distance-bounded random step (the key difference from our-evolve)
+                candidate = distance_mutate(current_rule, rng, max_step, worst_clause)
+            else:
                 try:
-                    refinement = (score_info["score_pct"] >= 80.0 and score_info["fn"] == 0)
+                    refinement = (score_now >= 80.0 and fn_now == 0)
                     if refinement:
                         prompt = _prompt_attributed(current_rule, score_info,
                                                     positives, negatives, n_clauses)
@@ -682,9 +724,6 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
                 except Exception as e:
                     print(f"    [LLM error: {e}]")
                     candidate = distance_mutate(current_rule, rng, max_step, worst_clause)
-            else:
-                # Distance-bounded random step
-                candidate = distance_mutate(current_rule, rng, max_step, worst_clause)
 
         elif config == "version-space":
             # Every K steps, use version-space oracle query to prune hypotheses.
@@ -805,14 +844,15 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-CONFIGS = ["random-only", "llm-only", "failure-informed", "distance", "version-space"]
+CONFIGS = ["random-only", "llm-only", "our-evolve", "distance", "version-space"]
+# "failure-informed" is an ablation of our-evolve (LLM-only, no random steps) — still runnable
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant",   default="z1",
                         choices=["z1", "z2", "z3"])
-    parser.add_argument("--config",    default="failure-informed",
-                        choices=CONFIGS + ["all"])
+    parser.add_argument("--config",    default="our-evolve",
+                        choices=CONFIGS + ["all", "failure-informed"])
     parser.add_argument("--seed",      type=int, default=42)
     parser.add_argument("--max-evals", type=int, default=80)
     args = parser.parse_args()

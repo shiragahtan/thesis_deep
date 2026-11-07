@@ -696,6 +696,7 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             stall_count += 1
         if stall_count >= 8 and best_score_seen > score_info["score_pct"]:
             current_rule = best_rule
+            score_info = score_rule(current_rule, positives, negatives)  # keep in sync
             stall_count = 0
 
         history.append({

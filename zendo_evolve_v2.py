@@ -69,11 +69,13 @@ else:
 def call_llm(prompt: str, temperature: float = 0.4) -> str:
     from openai import OpenAI
     client = OpenAI(api_key=LLM_API_KEY, base_url=LLM_BASE_URL)
+    # max_tokens=512: Groq free tier has 1000 OTPM limit; a rule JSON fits in ~200 tokens.
+    # Keeping this well below 1000 avoids OTPM 429 errors.
     resp = client.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
-        max_tokens=1024,
+        max_tokens=512,
     )
     return resp.choices[0].message.content.strip()
 
@@ -391,8 +393,8 @@ def score_rule(rule: Rule, positives: list[World], negatives: list[World]) -> di
 # ── LLM prompts ──────────────────────────────────────────────────────────────
 
 def _prompt_simple(rule: Rule, score_info: dict, n_clauses: int) -> str:
-    fp = score_info["false_positives"][:4]
-    fn = score_info["false_negatives"][:4]
+    fp = score_info["false_positives"][:3]
+    fn = score_info["false_negatives"][:3]
     fp_text = "\n".join(f"  {world_to_nl(w)}" for w in fp) if fp else "  (none)"
     fn_text = "\n".join(f"  {world_to_nl(w)}" for w in fn) if fn else "  (none)"
 
@@ -489,8 +491,8 @@ INSTRUCTIONS:
 
 def _prompt_openevolve(positives: list[World], negatives: list[World],
                        rule: Rule) -> str:
-    pos_text = "\n".join(world_to_nl(w) for w in positives[:8])
-    neg_text = "\n".join(world_to_nl(w) for w in negatives[:8])
+    pos_text = "\n".join(world_to_nl(w) for w in positives[:5])
+    neg_text = "\n".join(world_to_nl(w) for w in negatives[:5])
     return f"""You are finding a hidden rule for the Zendo game.
 
 POSITIVE worlds (rule holds):

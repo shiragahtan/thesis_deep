@@ -1,21 +1,19 @@
 """
 zendo_evolve_v2.py
 ------------------
-Extended Zendo solver comparing 5 methods:
+Extended Zendo solver comparing 7 methods:
 
   1. random-only    — pure random mutation baseline (no LLM)
-  2. llm-only       — LLM proposes rules, sees examples but NOT which are wrong
-                      (OpenEvolve-style; same LLM as all other methods)
-  3. our-evolve     — 70% LLM with failure signal + 30% random mutation
-                      (adaptive: switches to 100% LLM in refinement phase)
-                      THIS IS OUR MAIN METHOD — the 30/70 mix
-  4. distance       — our-evolve + distance-based annealed mutations
-                      (step size anneals from large exploration to small refinement)
-  5. version-space  — our-evolve + oracle queries for best discriminating worlds
-                      (AlphaEvolve finds maximally informative query; oracle eliminates rules)
+  2. llm-only       — pure LLM ablation: no random steps, no failure signal
+  3. openevolve     — TRUE OpenEvolve baseline: 70% LLM (no failure signal) + 30% random
+                      (same 70/30 structure as our method but blind to which examples are wrong)
+  4. our-evolve     — 70% LLM WITH failure signal + 30% random  ← MAIN METHOD
+  5. distance       — our-evolve + predicate-Hamming annealed random steps
+  6. distance-emb   — our-evolve + embedding-cosine annealed random steps (needs Ollama)
+  7. version-space  — our-evolve + oracle queries for maximally discriminating worlds
 
-All methods use the same LLM: qwen/qwen3.8-27b via Groq API.
-"llm-only" is a same-LLM same-budget ablation of our-evolve (failure signal removed).
+All LLM methods use the same model (qwen/qwen3.8-27b on Groq or qwen2.5:7b on Ollama).
+Embedding distance (distance-emb) uses nomic-embed-text via Ollama.
 
 New features over v1:
   - Oracle query interface: phi(world) for any sampled world
@@ -52,13 +50,18 @@ from mat_framework.targets import phi as phi_of_variant, target_rule
 LLM_BACKEND = os.environ.get("LLM_BACKEND", "groq").lower()
 
 if LLM_BACKEND == "ollama":
-    LLM_API_KEY  = "ollama"           # Ollama ignores the key
-    LLM_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    LLM_MODEL    = os.environ.get("LLM_MODEL", "qwen2.5:7b")
+    LLM_API_KEY    = "ollama"
+    LLM_BASE_URL   = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    LLM_MODEL      = os.environ.get("LLM_MODEL", "qwen2.5:7b")
+    EMBED_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    EMBED_MODEL    = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 else:
-    LLM_API_KEY  = os.environ.get("GROQ_API_KEY", "")
-    LLM_BASE_URL = "https://api.groq.com/openai/v1"
-    LLM_MODEL    = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
+    LLM_API_KEY    = os.environ.get("GROQ_API_KEY", "")
+    LLM_BASE_URL   = "https://api.groq.com/openai/v1"
+    LLM_MODEL      = os.environ.get("LLM_MODEL", "qwen/qwen3.8-27b")
+    # Groq doesn't support embeddings — fall back to Ollama for embedding distance
+    EMBED_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    EMBED_MODEL    = os.environ.get("EMBED_MODEL", "nomic-embed-text")
     if not LLM_API_KEY:
         raise EnvironmentError("Set GROQ_API_KEY before running (or set LLM_BACKEND=ollama)")
 
@@ -144,6 +147,52 @@ def semantic_distance(r1: Rule, r2: Rule, worlds: list[World]) -> float:
         return 0.0
     disagree = sum(1 for w in worlds if evaluate(r1, w) != evaluate(r2, w))
     return disagree / len(worlds)
+
+
+def _rule_to_nl(rule: Rule) -> str:
+    """Human-readable string for a rule, used as embedding input."""
+    clauses = rule.to_dict()["clauses"]
+    parts = []
+    for i, cl in enumerate(clauses):
+        preds = [f"{c['pred']}({','.join(c['args'])})" for c in cl["conditions"]]
+        parts.append(f"clause{i+1}: " + " AND ".join(preds))
+    return " OR ".join(parts)
+
+
+_embed_cache: dict[str, list[float]] = {}
+
+def _embed(text: str) -> list[float]:
+    """Get embedding vector for text via Ollama (cached)."""
+    if text in _embed_cache:
+        return _embed_cache[text]
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key="ollama", base_url=EMBED_BASE_URL)
+        resp = client.embeddings.create(model=EMBED_MODEL, input=text)
+        vec = resp.data[0].embedding
+        _embed_cache[text] = vec
+        return vec
+    except Exception:
+        return []
+
+
+def embedding_distance(r1: Rule, r2: Rule) -> float:
+    """Cosine distance between rule embeddings (0=identical, 1=orthogonal, 2=opposite).
+
+    Uses Ollama's nomic-embed-text (or EMBED_MODEL) to embed the NL rule description.
+    Falls back to predicate_distance if embedding fails.
+    """
+    v1 = _embed(_rule_to_nl(r1))
+    v2 = _embed(_rule_to_nl(r2))
+    if not v1 or not v2 or len(v1) != len(v2):
+        return predicate_distance(r1, r2) / 10.0  # normalised fallback
+    dot = sum(a * b for a, b in zip(v1, v2))
+    n1 = sum(a * a for a in v1) ** 0.5
+    n2 = sum(b * b for b in v2) ** 0.5
+    if n1 == 0 or n2 == 0:
+        return 1.0
+    cosine_sim = dot / (n1 * n2)
+    return 1.0 - cosine_sim  # distance: 0=identical, higher=more different
 
 
 # ── Rule generation and mutation ──────────────────────────────────────────────
@@ -321,6 +370,12 @@ def score_rule(rule: Rule, positives: list[World], negatives: list[World]) -> di
         fp_attribution.append((w, guilty))
     fn_attribution = [(w, []) for w in fn_worlds]
 
+    # Per-clause: how many positives each clause covers (TP per clause)
+    clause_coverage = []
+    for i, c in enumerate(clauses):
+        covered = sum(1 for w in positives if _clause_accepts(c, w))
+        clause_coverage.append(covered)
+
     return {
         "accuracy": accuracy,
         "score_pct": round(accuracy * 100, 1),
@@ -329,24 +384,42 @@ def score_rule(rule: Rule, positives: list[World], negatives: list[World]) -> di
         "false_negatives": fn_worlds,
         "fp_attribution": fp_attribution,
         "fn_attribution": fn_attribution,
+        "clause_coverage": clause_coverage,  # positives covered by each clause
     }
 
 
 # ── LLM prompts ──────────────────────────────────────────────────────────────
 
 def _prompt_simple(rule: Rule, score_info: dict, n_clauses: int) -> str:
-    fp = score_info["false_positives"][:3]
-    fn = score_info["false_negatives"][:3]
-    fp_text = "\n".join(world_to_nl(w) for w in fp) if fp else "  (none)"
-    fn_text = "\n".join(world_to_nl(w) for w in fn) if fn else "  (none)"
+    fp = score_info["false_positives"][:4]
+    fn = score_info["false_negatives"][:4]
+    fp_text = "\n".join(f"  {world_to_nl(w)}" for w in fp) if fp else "  (none)"
+    fn_text = "\n".join(f"  {world_to_nl(w)}" for w in fn) if fn else "  (none)"
+
+    coverage = score_info.get("clause_coverage", [])
+    if n_clauses > 1 and coverage:
+        cov_lines = "\n".join(
+            f"  Clause {i+1}: covers {c}/{len(score_info['false_negatives']) + score_info['tp']} positives"
+            for i, c in enumerate(coverage)
+        )
+        multi_hint = f"""
+PER-CLAUSE COVERAGE (how many positives each clause fires on):
+{cov_lines}
+Tip: a {n_clauses}-clause OR rule succeeds if ANY clause matches.
+Each clause should independently cover a DIFFERENT subset of positives.
+"""
+    else:
+        multi_hint = ""
+
     return f"""You are finding a hidden rule for the Zendo game (exactly {n_clauses} clause(s)).
 A world is POSITIVE (rule holds) or NEGATIVE (rule does not hold).
+The rule fires if ANY of its clauses matches (OR logic).
 
 Current rule:
 {json.dumps(rule.to_dict(), indent=2)}
 
 Accuracy: {score_info['score_pct']}%  (fp={score_info['fp']} fn={score_info['fn']})
-
+{multi_hint}
 False positives (rule accepted these but they are NEGATIVE):
 {fp_text}
 
@@ -597,10 +670,31 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
     print(f"\n[{variant.upper()} | {config} | seed {seed}]")
     print(f"  Dataset: {len(positives)} positives, {len(negatives)} negatives")
 
+    stall_count = 0  # consecutive gens with no improvement
+    last_improvement_score = 0.0
+
     for gen in range(max_evals):
         evals += 1
         score_info = score_rule(current_rule, positives, negatives)
         exact = rules_equivalent(current_rule, target)
+
+        # Dead-rule detection: if ALL clauses cover 0 positives, restart from best seen.
+        # This avoids wasting budget on a completely non-firing rule.
+        if (n_clauses > 1
+                and all(c == 0 for c in score_info.get("clause_coverage", [1]))
+                and best_score_seen > 0):
+            current_rule = best_rule
+            score_info = score_rule(current_rule, positives, negatives)
+
+        # Stall detection: if score hasn't improved in last 8 gens, reset to best.
+        if score_info["score_pct"] > last_improvement_score:
+            last_improvement_score = score_info["score_pct"]
+            stall_count = 0
+        else:
+            stall_count += 1
+        if stall_count >= 8 and best_score_seen > score_info["score_pct"]:
+            current_rule = best_rule
+            stall_count = 0
 
         history.append({
             "gen": gen,
@@ -634,6 +728,8 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             candidate = dumb_mutate(current_rule, rng)
 
         elif config == "llm-only":
+            # Pure LLM ablation — no random steps, no failure signal.
+            # Not the same as OpenEvolve (which uses random steps too).
             try:
                 prompt = _prompt_openevolve(positives, negatives, current_rule)
                 out = call_llm(prompt)
@@ -641,6 +737,30 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             except Exception as e:
                 print(f"    [LLM error: {e}]")
                 candidate = dumb_mutate(current_rule, rng)
+
+        elif config == "openevolve":
+            # True OpenEvolve equivalent: 70% LLM (no failure signal) + 30% random.
+            # Same 70/30 split as our-evolve but LLM sees examples without knowing
+            # which are wrong — matching AlphaEvolve's blind-to-failure architecture.
+            score_now = score_info["score_pct"]
+            fn_now = score_info["fn"]
+            if score_now >= 80.0 and fn_now == 0:
+                smart_prob = 1.0
+            elif score_now >= 65.0:
+                smart_prob = 0.85
+            else:
+                smart_prob = 0.7
+            use_llm = rng.random() < smart_prob
+            if not use_llm:
+                candidate = dumb_mutate(current_rule, rng)
+            else:
+                try:
+                    prompt = _prompt_openevolve(positives, negatives, current_rule)
+                    out = call_llm(prompt)
+                    candidate = parse_rule_from_llm(out) or dumb_mutate(current_rule, rng)
+                except Exception as e:
+                    print(f"    [LLM error: {e}]")
+                    candidate = dumb_mutate(current_rule, rng)
 
         elif config in ("failure-informed", "our-evolve"):
             # failure-informed: pure LLM with failure signal (smart-only ablation)
@@ -735,6 +855,58 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
                     print(f"    [LLM error: {e}]")
                     candidate = distance_mutate(current_rule, rng, max_step, worst_clause)
 
+        elif config == "distance-emb":
+            # our-evolve + embedding-space distance annealing.
+            # Random steps are filtered by cosine distance in rule embedding space
+            # (via nomic-embed-text). Requires Ollama running with nomic-embed-text.
+            max_step_emb = anneal_step(gen, max_evals, initial=0.5, final=0.05)
+
+            guilty_counts: dict[int, int] = {}
+            for _, guilty in score_info["fp_attribution"]:
+                for i in guilty:
+                    guilty_counts[i] = guilty_counts.get(i, 0) + 1
+            worst_clause = (max(guilty_counts, key=guilty_counts.get)
+                            if guilty_counts else None)
+
+            score_now = score_info["score_pct"]
+            fn_now = score_info["fn"]
+            if score_now >= 80.0 and fn_now == 0:
+                smart_prob = 1.0
+            elif score_now >= 65.0:
+                smart_prob = 0.85
+            else:
+                smart_prob = 0.7
+
+            use_llm = rng.random() < smart_prob
+            if not use_llm:
+                # Generate candidates and pick the one closest to current rule
+                # within the annealed embedding distance budget
+                best_cand = None
+                best_dist = float("inf")
+                for _ in range(10):
+                    cand = dumb_mutate(current_rule, rng, worst_clause)
+                    d = embedding_distance(current_rule, cand)
+                    if d <= max_step_emb and d < best_dist:
+                        best_dist = d
+                        best_cand = cand
+                candidate = best_cand if best_cand is not None else dumb_mutate(current_rule, rng)
+            else:
+                try:
+                    refinement = (score_now >= 80.0 and fn_now == 0)
+                    if refinement:
+                        prompt = _prompt_attributed(current_rule, score_info,
+                                                    positives, negatives, n_clauses)
+                        out = call_llm(prompt, temperature=0.6)
+                    else:
+                        prompt = _prompt_simple(current_rule, score_info, n_clauses)
+                        out = call_llm(prompt)
+                    candidate = parse_rule_from_llm(out)
+                    if candidate is None:
+                        candidate = dumb_mutate(current_rule, rng, worst_clause)
+                except Exception as e:
+                    print(f"    [LLM error: {e}]")
+                    candidate = dumb_mutate(current_rule, rng, worst_clause)
+
         elif config == "version-space":
             # Every K steps, use version-space oracle query to prune hypotheses.
             # Between queries, use failure-informed LLM or distance mutation.
@@ -821,11 +993,13 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
         cand_score = score_rule(candidate, positives, negatives)
         delta = cand_score["score_pct"] - score_info["score_pct"]
 
-        # Acceptance: smart/LLM configs allow -10% to escape local optima
+        # Acceptance: allow small drops to escape local optima, but clamp to avoid drift.
+        # The allowed drop narrows as we approach a good solution (simulated annealing spirit).
         if config in ("random-only",):
             accept = delta >= 0 or rng.random() < 0.15
         else:
-            accept = delta >= -10.0
+            # Allow at most a 5% drop (was 10% — too permissive for multi-clause rules).
+            accept = delta >= -5.0
 
         if accept:
             current_rule = candidate
@@ -833,8 +1007,8 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
                 best_rule = candidate
                 best_score_seen = cand_score["score_pct"]
 
-        # Periodic reset to best seen
-        elif gen > 0 and gen % 10 == 0 and score_info["score_pct"] < best_score_seen - 5:
+        # Reset to best seen if we've drifted more than 5% below it for 5+ gens.
+        if gen > 0 and gen % 5 == 0 and score_info["score_pct"] < best_score_seen - 5:
             current_rule = best_rule
 
     elapsed = time.time() - start_time
@@ -854,22 +1028,38 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-CONFIGS = ["random-only", "llm-only", "our-evolve", "distance", "version-space"]
-# "failure-informed" is an ablation of our-evolve (LLM-only, no random steps) — still runnable
+CONFIGS = ["random-only", "llm-only", "openevolve", "our-evolve",
+           "distance", "distance-emb", "version-space"]
+# llm-only       = pure LLM ablation (no random, no failure signal)
+# openevolve     = true OpenEvolve: 70% LLM (no failure signal) + 30% random
+# our-evolve     = 70% LLM (WITH failure signal) + 30% random  ← main method
+# distance       = our-evolve + predicate-Hamming annealed random steps
+# distance-emb   = our-evolve + embedding-cosine annealed random steps
+# failure-informed = LLM-only ablation of our-evolve, still runnable
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--variant",   default="z1",
                         choices=["z1", "z2", "z3"])
     parser.add_argument("--config",    default="our-evolve",
-                        choices=CONFIGS + ["all", "failure-informed"])
+                        choices=CONFIGS + ["all", "failure-informed", "all-extended"])
     parser.add_argument("--seed",      type=int, default=42)
     parser.add_argument("--max-evals", type=int, default=80)
     args = parser.parse_args()
 
-    if args.config == "all":
+    if args.config == "all-extended":
+        # Runs all configs including openevolve and distance-emb (needs Ollama)
+        run_configs = CONFIGS
+    elif args.config == "all":
+        # Original 5-method comparison (no embedding distance, faster)
+        run_configs = ["random-only", "llm-only", "openevolve", "our-evolve",
+                       "distance", "version-space"]
+    else:
+        run_configs = None
+
+    if run_configs is not None:
         results = []
-        for cfg in CONFIGS:
+        for cfg in run_configs:
             r = run(args.variant, cfg, args.seed, args.max_evals)
             results.append(r)
         print("\n=== SUMMARY ===")

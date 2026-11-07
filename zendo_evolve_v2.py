@@ -635,7 +635,17 @@ def _eliminate_inconsistent(h_pool: list[Rule],
 
 # ── Main evolutionary loop ────────────────────────────────────────────────────
 
-def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
+def run(variant: str, config: str, seed: int, max_evals: int = 80,
+        base_smart_prob: float = 0.7) -> dict:
+    """Run one evolutionary search trial.
+
+    base_smart_prob: fraction of steps that use the LLM at the exploration phase
+        (score < 65%). Default 0.7 = 70/30 split. Set to 0.5 for 50/50, 0.9 for 90/10.
+        Adaptive scaling still applies on top of this:
+            score >= 80% and fn==0 → 1.0 (pure LLM refinement)
+            score >= 65%            → base + 0.5*(1-base)
+            else                    → base_smart_prob
+    """
     rng = random.Random(seed)
     phi = phi_of_variant(variant)
     target = target_rule(variant)
@@ -750,9 +760,9 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             if score_now >= 80.0 and fn_now == 0:
                 smart_prob = 1.0
             elif score_now >= 65.0:
-                smart_prob = 0.85
+                smart_prob = base_smart_prob + 0.5 * (1 - base_smart_prob)
             else:
-                smart_prob = 0.7
+                smart_prob = base_smart_prob
             use_llm = rng.random() < smart_prob
             if not use_llm:
                 candidate = dumb_mutate(current_rule, rng)
@@ -767,17 +777,17 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
 
         elif config in ("failure-informed", "our-evolve"):
             # failure-informed: pure LLM with failure signal (smart-only ablation)
-            # our-evolve:       70% LLM with failure signal + 30% random (THE MAIN METHOD)
+            # our-evolve:       base_smart_prob% LLM with failure signal + rest random
             #   adaptive: when score>=80% and fn=0, switch to 100% LLM for refinement
             if config == "our-evolve":
                 fn_now = score_info["fn"]
                 score_now = score_info["score_pct"]
                 if score_now >= 80.0 and fn_now == 0:
-                    smart_prob = 1.0   # refinement: pure LLM
+                    smart_prob = 1.0
                 elif score_now >= 65.0:
-                    smart_prob = 0.85  # mostly LLM once structure is emerging
+                    smart_prob = base_smart_prob + 0.5 * (1 - base_smart_prob)
                 else:
-                    smart_prob = 0.7   # exploration: 70/30 split
+                    smart_prob = base_smart_prob
                 use_llm = rng.random() < smart_prob
             else:
                 use_llm = True  # failure-informed always uses LLM
@@ -827,15 +837,15 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             worst_clause = (max(guilty_counts, key=guilty_counts.get)
                             if guilty_counts else None)
 
-            # Same adaptive 70/30 split as our-evolve
+            # Same adaptive split as our-evolve, using base_smart_prob
             score_now = score_info["score_pct"]
             fn_now = score_info["fn"]
             if score_now >= 80.0 and fn_now == 0:
                 smart_prob = 1.0
             elif score_now >= 65.0:
-                smart_prob = 0.85
+                smart_prob = base_smart_prob + 0.5 * (1 - base_smart_prob)
             else:
-                smart_prob = 0.7
+                smart_prob = base_smart_prob
 
             use_llm = rng.random() < smart_prob
             if not use_llm:
@@ -876,9 +886,9 @@ def run(variant: str, config: str, seed: int, max_evals: int = 80) -> dict:
             if score_now >= 80.0 and fn_now == 0:
                 smart_prob = 1.0
             elif score_now >= 65.0:
-                smart_prob = 0.85
+                smart_prob = base_smart_prob + 0.5 * (1 - base_smart_prob)
             else:
-                smart_prob = 0.7
+                smart_prob = base_smart_prob
 
             use_llm = rng.random() < smart_prob
             if not use_llm:
@@ -1042,12 +1052,16 @@ CONFIGS = ["random-only", "llm-only", "openevolve", "our-evolve",
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--variant",   default="z1",
+    parser.add_argument("--variant",    default="z1",
                         choices=["z1", "z2", "z3"])
     parser.add_argument("--config",    default="our-evolve",
                         choices=CONFIGS + ["all", "failure-informed", "all-extended"])
     parser.add_argument("--seed",      type=int, default=42)
     parser.add_argument("--max-evals", type=int, default=80)
+    parser.add_argument("--smart-prob", type=float, default=0.7,
+                        help="Base LLM fraction for our-evolve/openevolve/distance "
+                             "(0.5=50/50, 0.7=70/30, 0.9=90/10). "
+                             "Default 0.7. Adaptive scaling applied on top.")
     args = parser.parse_args()
 
     if args.config == "all-extended":
@@ -1060,10 +1074,12 @@ if __name__ == "__main__":
     else:
         run_configs = None
 
+    smart_prob = args.smart_prob
+
     if run_configs is not None:
         results = []
         for cfg in run_configs:
-            r = run(args.variant, cfg, args.seed, args.max_evals)
+            r = run(args.variant, cfg, args.seed, args.max_evals, smart_prob)
             results.append(r)
         print("\n=== SUMMARY ===")
         print(f"{'Config':<20} {'Solved':<8} {'Evals':<8} {'Score':<8} {'OracleQ':<8}")
@@ -1072,5 +1088,5 @@ if __name__ == "__main__":
                   f"{r['evals']:<8} {r['final_score']:<8} {r['oracle_queries']:<8}")
         print(json.dumps(results, indent=2))
     else:
-        result = run(args.variant, args.config, args.seed, args.max_evals)
+        result = run(args.variant, args.config, args.seed, args.max_evals, smart_prob)
         print(json.dumps(result, indent=2))
